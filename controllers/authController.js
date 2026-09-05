@@ -1,6 +1,6 @@
 // controllers/authController.js
 import bcrypt from "bcryptjs";
-import pool from "../db.js"; // import your pool directly
+import pool from "../database/db.js"; // import your pool directly
 import { generateToken } from "../utils/generateToken.js";
 
 // REGISTER

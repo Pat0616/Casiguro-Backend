@@ -4,7 +4,7 @@ import cookieParser from "cookie-parser";
 import cors from "cors";
 
 import authRouter from "./routes/authRoutes.js";
-import userRoutes from "./routes/userRoutes.js";
+
 
 dotenv.config();
 const app = express();
@@ -22,7 +22,7 @@ app.use(
 
 
 app.use("/api/auth", authRouter);
-app.use("/api/users", userRoutes);
+
 
 app.get("/", (req, res) => {
   res.send("API is running...");
