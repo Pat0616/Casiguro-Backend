@@ -1,33 +1,40 @@
 import express from "express";
+import http from "http";
 import dotenv from "dotenv";
 import cookieParser from "cookie-parser";
 import cors from "cors";
 
 import authRouter from "./routes/authRoutes.js";
-
+import orderRouter from "./routes/orderRoutes.js";
+import notificationRouter from "./routes/notificationRoutes.js";
+import { initSocket } from "./websocket/socket.js";
 
 dotenv.config();
 const app = express();
+const httpServer = http.createServer(app);
+
+const clientOrigin = process.env.CLIENT_ORIGIN || "http://localhost:5173";
+
+// Initialize WebSocket server
+initSocket(httpServer, clientOrigin);
 
 app.use(express.json());
 app.use(cookieParser());
 
-
 app.use(
   cors({
-    origin: process.env.CLIENT_ORIGIN || "http://localhost:5173",
+    origin: clientOrigin,
     credentials: true,
-  }),
+  })
 );
 
-
 app.use("/api/auth", authRouter);
-
+app.use("/api/orders", orderRouter);
+app.use("/api/notifications", notificationRouter);
 
 app.get("/", (req, res) => {
-  res.send("API is running...");
+  res.send("CASIGURO Enterprises API is running...");
 });
 
-
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+httpServer.listen(PORT, () => console.log(`Server running on port ${PORT} with WebSocket enabled`));
