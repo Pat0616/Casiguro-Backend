@@ -6,25 +6,25 @@ import { generateToken } from "../utils/generateToken.js";
 // REGISTER
 export async function register(req, res) {
   try {
-    const { username, password } = req.body;
+    const { full_name, email, password, role  } = req.body;
     // Check if username exists
     const [existingRows] = await pool.query(
-      "SELECT * FROM userlogin WHERE username = ?",
-      [username],
+      "SELECT * FROM users WHERE full_name = ?",
+      [full_name],
     );
     if (existingRows.length > 0) {
-      return res.status(400).json({ message: "Username already taken" });
+      return res.status(400).json({ message: "Full name already taken" });
     }
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
     // Insert user
     const [result] = await pool.query(
-      "INSERT INTO userlogin (username, password) VALUES (?, ?)",
-      [username, hashedPassword],
+      "INSERT INTO users (full_name, email, password, role) VALUES (?, ?, ?, ?)",
+      [full_name, email, hashedPassword, role],
     );
     res.status(201).json({
       message: "Registered successfully",
-      user: { id: result.insertId, username },
+      user: { id: result.insertId, full_name, email, role },
     });
   } catch (err) {
     console.error("Register error:", err);
@@ -35,10 +35,10 @@ export async function register(req, res) {
 // LOGIN
 export async function login(req, res) {
   try {
-    const { username, password } = req.body;
+    const { email, password } = req.body;
     const [rows] = await pool.query(
-      "SELECT * FROM userlogin WHERE username = ?",
-      [username],
+      "SELECT * FROM users WHERE email = ?",
+      [email],
     );
     const user = rows[0];
     if (!user) return res.status(400).json({ message: "Invalid credentials" });
@@ -55,7 +55,7 @@ export async function login(req, res) {
     });
     res.json({
       message: "Login successful",
-      user: { id: user.id, username: user.username },
+      user: { id: user.id, full_name: user.full_name, email: user.email, role: user.role },
     });
   } catch (err) {
     console.error("Login error:", err);
@@ -75,7 +75,7 @@ export async function getMe(req, res) {
     if (!req.user)
       return res.status(401).json({ message: "Not authenticated" });
     const [rows] = await pool.query(
-      "SELECT id, username FROM userlogin WHERE id = ?",
+      "SELECT id, full_name, email, role FROM users WHERE id = ?",
       [req.user.id],
     );
     const user = rows[0];
