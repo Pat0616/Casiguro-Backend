@@ -16,3 +16,4 @@ router.put("/:id", protect, requireAdmin, updateCatalogItem);
 router.patch("/:id/status", protect, requireAdmin, toggleCatalogItemStatus);
 
 export default router;
+
