@@ -1,5 +1,6 @@
 -- ========================================================
 -- CASIGURO ENTERPRISES TRANSACTION MANAGEMENT SYSTEM SCHEMA
+-- Enterprise Transaction Platform (Catalog -> Quotations -> Orders -> Production)
 -- Database: casigurotest (or your_database)
 -- Character Set: utf8mb4 / utf8mb4_unicode_ci
 -- ========================================================
@@ -39,7 +40,7 @@ CREATE TABLE IF NOT EXISTS customers (
 ) ENGINE=InnoDB;
 
 -- ========================================================
--- 3. CATEGORIES (Product classifications)
+-- 3. CATEGORIES (Product & Service classifications)
 -- ========================================================
 CREATE TABLE IF NOT EXISTS categories (
   id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
@@ -49,14 +50,18 @@ CREATE TABLE IF NOT EXISTS categories (
 ) ENGINE=InnoDB;
 
 -- ========================================================
--- 4. PRODUCTS (Catalog items & base pricing)
+-- 4. PRODUCTS & SERVICES CATALOG (Reference items & base pricing)
 -- ========================================================
 CREATE TABLE IF NOT EXISTS products (
   id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
   category_id CHAR(36),
+  type ENUM('product', 'service') NOT NULL DEFAULT 'product',
   name VARCHAR(150) NOT NULL,
+  base_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
   default_unit_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+  description TEXT,
   is_stock_item BOOLEAN NOT NULL DEFAULT FALSE,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
@@ -66,15 +71,94 @@ CREATE TABLE IF NOT EXISTS products (
     ON DELETE SET NULL
     ON UPDATE CASCADE,
 
-  INDEX idx_products_name (name)
+  INDEX idx_products_name (name),
+  INDEX idx_products_type (type),
+  INDEX idx_products_is_active (is_active)
 ) ENGINE=InnoDB;
 
 -- ========================================================
--- 5. ORDERS (Transactions, production state, and financials)
+-- 5. QUOTATIONS (Pre-order negotiation & pricing agreements)
+-- ========================================================
+CREATE TABLE IF NOT EXISTS quotations (
+  id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
+  quote_no VARCHAR(50) UNIQUE NOT NULL,
+  customer_id CHAR(36),
+  customer_name VARCHAR(150) NOT NULL,
+  contact_number VARCHAR(50),
+  status ENUM('draft', 'sent', 'accepted', 'rejected', 'expired') NOT NULL DEFAULT 'draft',
+  valid_until DATE NOT NULL,
+  total_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+  notes TEXT,
+  rejection_reason TEXT,
+  created_by CHAR(36),
+  updated_by CHAR(36),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+  CONSTRAINT fk_quotations_customer
+    FOREIGN KEY (customer_id)
+    REFERENCES customers(id)
+    ON DELETE SET NULL
+    ON UPDATE CASCADE,
+
+  CONSTRAINT fk_quotations_created_by
+    FOREIGN KEY (created_by)
+    REFERENCES users(id)
+    ON DELETE SET NULL
+    ON UPDATE CASCADE,
+
+  CONSTRAINT fk_quotations_updated_by
+    FOREIGN KEY (updated_by)
+    REFERENCES users(id)
+    ON DELETE SET NULL
+    ON UPDATE CASCADE,
+
+  INDEX idx_quotations_quote_no (quote_no),
+  INDEX idx_quotations_status (status),
+  INDEX idx_quotations_valid_until (valid_until),
+  INDEX idx_quotations_created_at (created_at DESC)
+) ENGINE=InnoDB;
+
+-- ========================================================
+-- 6. QUOTATION ITEMS (Line items with price snapshot & reasons)
+-- ========================================================
+CREATE TABLE IF NOT EXISTS quotation_items (
+  id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
+  quotation_id CHAR(36) NOT NULL,
+  product_service_id CHAR(36),
+  item_name_snapshot VARCHAR(150) NOT NULL,
+  item_description TEXT,
+  category_snapshot VARCHAR(100),
+  item_type ENUM('product', 'service') NOT NULL DEFAULT 'product',
+  is_custom BOOLEAN NOT NULL DEFAULT FALSE,
+  quantity INT NOT NULL DEFAULT 1,
+  base_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+  final_unit_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+  price_adjustment_reason TEXT,
+  subtotal DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+
+  CONSTRAINT fk_quotation_items_quotation
+    FOREIGN KEY (quotation_id)
+    REFERENCES quotations(id)
+    ON DELETE CASCADE
+    ON UPDATE CASCADE,
+
+  CONSTRAINT fk_quotation_items_product
+    FOREIGN KEY (product_service_id)
+    REFERENCES products(id)
+    ON DELETE SET NULL
+    ON UPDATE CASCADE,
+
+  INDEX idx_quotation_items_quotation_id (quotation_id)
+) ENGINE=InnoDB;
+
+-- ========================================================
+-- 7. ORDERS (Transactions, production state, and financials)
 -- ========================================================
 CREATE TABLE IF NOT EXISTS orders (
   id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
   ref_no VARCHAR(50) UNIQUE NOT NULL,
+  quotation_id CHAR(36),
 
   customer_id CHAR(36),
   product_id CHAR(36),
@@ -85,6 +169,7 @@ CREATE TABLE IF NOT EXISTS orders (
   order_type VARCHAR(20) NOT NULL DEFAULT 'custom',
   quantity INT NOT NULL DEFAULT 1,
   quantity_completed INT NOT NULL DEFAULT 0,
+  overall_progress INT NOT NULL DEFAULT 0,
 
   unit_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
   total_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
@@ -127,6 +212,12 @@ CREATE TABLE IF NOT EXISTS orders (
     ON DELETE SET NULL
     ON UPDATE CASCADE,
 
+  CONSTRAINT fk_orders_quotation
+    FOREIGN KEY (quotation_id)
+    REFERENCES quotations(id)
+    ON DELETE SET NULL
+    ON UPDATE CASCADE,
+
   CONSTRAINT fk_orders_product
     FOREIGN KEY (product_id)
     REFERENCES products(id)
@@ -152,6 +243,7 @@ CREATE TABLE IF NOT EXISTS orders (
     ON UPDATE CASCADE,
 
   INDEX idx_orders_ref_no (ref_no),
+  INDEX idx_orders_quotation_id (quotation_id),
   INDEX idx_orders_status (status),
   INDEX idx_orders_payment_status (payment_status),
   INDEX idx_orders_due_date (due_date),
@@ -160,7 +252,43 @@ CREATE TABLE IF NOT EXISTS orders (
 ) ENGINE=InnoDB;
 
 -- ========================================================
--- 6. NOTIFICATIONS (Persistent activity log for offline & online RTC)
+-- 8. ORDER ITEMS (Multi-item line tracking & itemized production)
+-- ========================================================
+CREATE TABLE IF NOT EXISTS order_items (
+  id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
+  order_id CHAR(36) NOT NULL,
+  product_service_id CHAR(36),
+  item_name_snapshot VARCHAR(150) NOT NULL,
+  item_description TEXT,
+  category_snapshot VARCHAR(100),
+  item_type ENUM('product', 'service') NOT NULL DEFAULT 'product',
+  is_custom BOOLEAN NOT NULL DEFAULT FALSE,
+  quantity INT NOT NULL DEFAULT 1,
+  base_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+  final_unit_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+  price_adjustment_reason TEXT,
+  subtotal DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+  quantity_completed INT NOT NULL DEFAULT 0,
+  production_progress INT NOT NULL DEFAULT 0,
+  production_status ENUM('pending', 'in_production', 'completed') NOT NULL DEFAULT 'pending',
+
+  CONSTRAINT fk_order_items_order
+    FOREIGN KEY (order_id)
+    REFERENCES orders(id)
+    ON DELETE CASCADE
+    ON UPDATE CASCADE,
+
+  CONSTRAINT fk_order_items_product
+    FOREIGN KEY (product_service_id)
+    REFERENCES products(id)
+    ON DELETE SET NULL
+    ON UPDATE CASCADE,
+
+  INDEX idx_order_items_order_id (order_id)
+) ENGINE=InnoDB;
+
+-- ========================================================
+-- 9. NOTIFICATIONS (Persistent activity log for offline & online RTC)
 -- ========================================================
 CREATE TABLE IF NOT EXISTS notifications (
   id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
@@ -183,7 +311,8 @@ CREATE TABLE IF NOT EXISTS notifications (
       notification_type IN (
         'new_order',
         'status_update',
-        'detail_update'
+        'detail_update',
+        'quotation_update'
       )
     ),
 
@@ -210,7 +339,7 @@ CREATE TABLE IF NOT EXISTS notifications (
 ) ENGINE=InnoDB;
 
 -- ========================================================
--- 7. ORDER EVENTS (Audit history for field-level diffs)
+-- 10. ORDER EVENTS (Audit history for field-level diffs)
 -- ========================================================
 CREATE TABLE IF NOT EXISTS order_events (
   id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
@@ -241,7 +370,7 @@ CREATE TABLE IF NOT EXISTS order_events (
 ) ENGINE=InnoDB;
 
 -- ========================================================
--- 8. PAYMENTS (Receipts & installment logs)
+-- 11. PAYMENTS (Receipts & installment logs)
 -- ========================================================
 CREATE TABLE IF NOT EXISTS payments (
   id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
