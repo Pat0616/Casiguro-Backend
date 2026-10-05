@@ -543,7 +543,12 @@ export async function updateItemProduction(req, res) {
   try {
     await conn.beginTransaction();
     const { id } = req.params;
-    const { items: updatedItemsList, itemId, quantityCompleted: singleQtyCompleted } = req.body;
+    const {
+      items: updatedItemsList,
+      itemId,
+      quantityCompleted: singleQtyCompleted,
+      allowIncompletePaymentCompletion = false,
+    } = req.body;
 
     const [existingOrders] = await conn.query("SELECT * FROM orders WHERE id = ? FOR UPDATE", [id]);
     if (existingOrders.length === 0) {
@@ -600,13 +605,14 @@ export async function updateItemProduction(req, res) {
     // Derived overall order production status
     let derivedStatus = "pending";
     if (overallProgress >= 100) {
-      derivedStatus = "completed";
+      const hasOutstandingBalance = Number(order.total_price) > Number(order.amount_paid);
+      derivedStatus = hasOutstandingBalance && !allowIncompletePaymentCompletion ? "ready" : "completed";
     } else if (overallProgress > 0) {
       derivedStatus = "in_production";
     }
 
     const todayStr = new Date().toISOString().slice(0, 10);
-    const dateCompleted = derivedStatus === "completed" ? (order.date_completed || todayStr) : (derivedStatus === "pending" ? null : order.date_completed);
+    const dateCompleted = derivedStatus === "completed" ? (order.date_completed || todayStr) : null;
 
     const userId = req.user?.id || null;
     const userName = req.user?.full_name || "Production Team";
