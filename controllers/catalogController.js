@@ -17,6 +17,7 @@ export async function getCatalogItems(req, res) {
         CAST(p.base_price AS DOUBLE) AS basePrice,
         CAST(p.default_unit_price AS DOUBLE) AS defaultUnitPrice,
         p.description,
+        p.image_url AS imageUrl,
         p.is_stock_item AS isStockItem,
         p.is_active AS isActive,
         p.category_id AS categoryId,
@@ -63,6 +64,7 @@ export async function createCatalogItem(req, res) {
       type = "product",
       basePrice = 0,
       description = "",
+      imageUrl = null,
       categoryId = null,
       isStockItem = false,
       isActive = true,
@@ -94,8 +96,8 @@ export async function createCatalogItem(req, res) {
 
     await pool.query(
       `INSERT INTO products (
-        id, category_id, type, name, base_price, default_unit_price, description, is_stock_item, is_active
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id, category_id, type, name, base_price, default_unit_price, description, image_url, is_stock_item, is_active
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         finalCategoryId,
@@ -104,6 +106,7 @@ export async function createCatalogItem(req, res) {
         price,
         price,
         description ? description.trim() : null,
+        imageUrl || null,
         Boolean(isStockItem),
         Boolean(isActive),
       ]
@@ -117,6 +120,7 @@ export async function createCatalogItem(req, res) {
         CAST(p.base_price AS DOUBLE) AS basePrice,
         CAST(p.default_unit_price AS DOUBLE) AS defaultUnitPrice,
         p.description,
+        p.image_url AS imageUrl,
         p.is_stock_item AS isStockItem,
         p.is_active AS isActive,
         p.category_id AS categoryId,
@@ -143,6 +147,7 @@ export async function updateCatalogItem(req, res) {
       type,
       basePrice,
       description,
+      imageUrl,
       categoryId,
       isStockItem,
       isActive,
@@ -158,6 +163,7 @@ export async function updateCatalogItem(req, res) {
     const newType = type !== undefined ? type : current.type;
     const newPrice = basePrice !== undefined ? Math.max(0, Number(basePrice) || 0) : Number(current.base_price);
     const newDesc = description !== undefined ? description : current.description;
+    const newImageUrl = imageUrl !== undefined ? imageUrl : current.image_url;
     const newStock = isStockItem !== undefined ? Boolean(isStockItem) : Boolean(current.is_stock_item);
     const newActive = isActive !== undefined ? Boolean(isActive) : Boolean(current.is_active);
     const newCatId = categoryId !== undefined ? categoryId : current.category_id;
@@ -169,6 +175,7 @@ export async function updateCatalogItem(req, res) {
         base_price = ?,
         default_unit_price = ?,
         description = ?,
+        image_url = ?,
         category_id = ?,
         is_stock_item = ?,
         is_active = ?
@@ -179,6 +186,7 @@ export async function updateCatalogItem(req, res) {
         newPrice,
         newPrice,
         newDesc,
+        newImageUrl,
         newCatId,
         newStock,
         newActive,
@@ -194,6 +202,7 @@ export async function updateCatalogItem(req, res) {
         CAST(p.base_price AS DOUBLE) AS basePrice,
         CAST(p.default_unit_price AS DOUBLE) AS defaultUnitPrice,
         p.description,
+        p.image_url AS imageUrl,
         p.is_stock_item AS isStockItem,
         p.is_active AS isActive,
         p.category_id AS categoryId,
@@ -231,4 +240,3 @@ export async function toggleCatalogItemStatus(req, res) {
     res.status(500).json({ message: "Failed to toggle item status" });
   }
 }
-

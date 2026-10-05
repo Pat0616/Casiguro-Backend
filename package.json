@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "nodemon server.js",
+    "migrate:catalog-images": "node scripts/migrate_catalog_images.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "",
