@@ -32,6 +32,21 @@ function validateVariants(value) {
   return { valid: true, variants };
 }
 
+async function resolveCategoryId(categoryValue) {
+  if (typeof categoryValue !== "string" || !categoryValue.trim()) return null;
+  const value = categoryValue.trim();
+
+  const [categoryById] = await pool.query("SELECT id FROM categories WHERE id = ?", [value]);
+  if (categoryById.length > 0) return categoryById[0].id;
+
+  const [categoryByName] = await pool.query("SELECT id FROM categories WHERE name = ?", [value]);
+  if (categoryByName.length > 0) return categoryByName[0].id;
+
+  const categoryId = crypto.randomUUID();
+  await pool.query("INSERT INTO categories (id, name) VALUES (?, ?)", [categoryId, value]);
+  return categoryId;
+}
+
 // GET /api/catalog
 // Fetches catalog items. If employee or unauthenticated, filters to active only.
 export async function getCatalogItems(req, res) {
@@ -117,18 +132,7 @@ export async function createCatalogItem(req, res) {
     const price = Math.max(0, Number(basePrice) || 0);
     const id = crypto.randomUUID();
 
-    // Verify or resolve category
-    let finalCategoryId = categoryId;
-    if (typeof categoryId === "string" && categoryId.trim() && !categoryId.includes("-")) {
-      // If client sent a category name rather than UUID
-      const [catRows] = await pool.query("SELECT id FROM categories WHERE name = ?", [categoryId.trim()]);
-      if (catRows.length > 0) {
-        finalCategoryId = catRows[0].id;
-      } else {
-        finalCategoryId = crypto.randomUUID();
-        await pool.query("INSERT INTO categories (id, name) VALUES (?, ?)", [finalCategoryId, categoryId.trim()]);
-      }
-    }
+    const finalCategoryId = await resolveCategoryId(categoryId);
 
     await pool.query(
       `INSERT INTO products (
@@ -211,7 +215,9 @@ export async function updateCatalogItem(req, res) {
     const newImageUrl = imageUrl !== undefined ? imageUrl : current.image_url;
     const newStock = isStockItem !== undefined ? Boolean(isStockItem) : Boolean(current.is_stock_item);
     const newActive = isActive !== undefined ? Boolean(isActive) : Boolean(current.is_active);
-    const newCatId = categoryId !== undefined ? categoryId : current.category_id;
+    const newCatId = categoryId !== undefined
+      ? await resolveCategoryId(categoryId)
+      : current.category_id;
 
     await pool.query(
       `UPDATE products SET
