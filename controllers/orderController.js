@@ -31,6 +31,7 @@ async function attachItemsToOrders(orders) {
       oi.order_id AS orderId,
       oi.product_service_id AS productServiceId,
       oi.item_name_snapshot AS itemName,
+      oi.variant_snapshot AS selectedVariant,
       COALESCE(oi.item_description, '') AS itemDescription,
       COALESCE(oi.category_snapshot, 'General') AS category,
       oi.item_type AS itemType,
@@ -223,14 +224,24 @@ export async function createOrder(req, res) {
     // 4. Determine items
     let preparedItems = [];
     if (Array.isArray(rawItems) && rawItems.length > 0) {
+      for (const [index, item] of rawItems.entries()) {
+        if (
+          item.selectedVariant != null &&
+          (typeof item.selectedVariant !== "string" || !item.selectedVariant.trim() || item.selectedVariant.trim().length > 150)
+        ) {
+          await conn.rollback();
+          return res.status(400).json({ message: `Item #${index + 1} has an invalid option name` });
+        }
+      }
       preparedItems = rawItems.map((it) => {
         const q = Math.max(1, Number(it.quantity) || 1);
         const p = Math.max(0, Number(it.finalUnitPrice ?? it.unitPrice ?? it.basePrice) || 0);
-        const bp = Math.max(0, Number(it.basePrice) || p);
+        const bp = Math.max(0, Number(it.basePrice ?? p) || 0);
         return {
           id: crypto.randomUUID(),
           productServiceId: it.productServiceId || null,
           itemName: it.itemName || it.product || "Printing Item",
+          selectedVariant: typeof it.selectedVariant === "string" ? it.selectedVariant.trim() || null : null,
           itemDescription: it.itemDescription || "",
           category: it.category || category || "General",
           itemType: it.itemType || "product",
@@ -252,6 +263,7 @@ export async function createOrder(req, res) {
         id: crypto.randomUUID(),
         productServiceId: null,
         itemName: (product || "Custom Printing").trim(),
+        selectedVariant: null,
         itemDescription: notes ? notes.trim() : "",
         category: category ? category.trim() : "General",
         itemType: "product",
@@ -321,16 +333,17 @@ export async function createOrder(req, res) {
       await conn.query(
         `INSERT INTO order_items (
           id, order_id, product_service_id, item_name_snapshot,
-          item_description, category_snapshot, item_type, is_custom,
+          item_description, variant_snapshot, category_snapshot, item_type, is_custom,
           quantity, base_price, final_unit_price, price_adjustment_reason,
           subtotal, quantity_completed, production_progress, production_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           item.id,
           orderId,
           item.productServiceId,
           item.itemName,
           item.itemDescription,
+          item.selectedVariant,
           item.category,
           item.itemType,
           item.isCustom,

@@ -70,6 +70,7 @@ export async function getQuotations(req, res) {
         qi.quotation_id AS quotationId,
         qi.product_service_id AS productServiceId,
         qi.item_name_snapshot AS itemName,
+        qi.variant_snapshot AS selectedVariant,
         COALESCE(qi.item_description, '') AS itemDescription,
         COALESCE(qi.category_snapshot, 'General') AS category,
         qi.item_type AS itemType,
@@ -145,6 +146,7 @@ export async function getQuotationById(req, res) {
         qi.quotation_id AS quotationId,
         qi.product_service_id AS productServiceId,
         qi.item_name_snapshot AS itemName,
+        qi.variant_snapshot AS selectedVariant,
         COALESCE(qi.item_description, '') AS itemDescription,
         COALESCE(qi.category_snapshot, 'General') AS category,
         qi.item_type AS itemType,
@@ -202,6 +204,13 @@ export async function createQuotation(req, res) {
       if (!item.itemName || !item.itemName.trim()) {
         await conn.rollback();
         return res.status(400).json({ message: `Item #${i + 1} requires a valid item name` });
+      }
+      if (
+        item.selectedVariant != null &&
+        (typeof item.selectedVariant !== "string" || !item.selectedVariant.trim() || item.selectedVariant.trim().length > 150)
+      ) {
+        await conn.rollback();
+        return res.status(400).json({ message: `Item #${i + 1} has an invalid option name` });
       }
 
       const qty = Number(item.quantity) || 0;
@@ -265,6 +274,7 @@ export async function createQuotation(req, res) {
         id: crypto.randomUUID(),
         productServiceId: item.productServiceId || null,
         itemName: item.itemName.trim(),
+        selectedVariant: item.selectedVariant ? item.selectedVariant.trim() : null,
         itemDescription: item.itemDescription ? item.itemDescription.trim() : null,
         category: item.category ? item.category.trim() : "General",
         itemType: item.itemType === "service" ? "service" : "product",
@@ -307,15 +317,16 @@ export async function createQuotation(req, res) {
       await conn.query(
         `INSERT INTO quotation_items (
           id, quotation_id, product_service_id, item_name_snapshot,
-          item_description, category_snapshot, item_type, is_custom,
+          item_description, variant_snapshot, category_snapshot, item_type, is_custom,
           quantity, base_price, final_unit_price, price_adjustment_reason, subtotal
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
         [
           item.id,
           quoteId,
           item.productServiceId,
           item.itemName,
           item.itemDescription,
+          item.selectedVariant,
           item.category,
           item.itemType,
           item.isCustom,
@@ -398,6 +409,13 @@ export async function updateQuotation(req, res) {
         await conn.rollback();
         return res.status(400).json({ message: `Item #${i + 1} requires an item name` });
       }
+      if (
+        item.selectedVariant != null &&
+        (typeof item.selectedVariant !== "string" || !item.selectedVariant.trim() || item.selectedVariant.trim().length > 150)
+      ) {
+        await conn.rollback();
+        return res.status(400).json({ message: `Item #${i + 1} has an invalid option name` });
+      }
 
       const qty = Number(item.quantity) || 0;
       if (qty <= 0) {
@@ -433,6 +451,7 @@ export async function updateQuotation(req, res) {
         id: item.id || crypto.randomUUID(),
         productServiceId: item.productServiceId || null,
         itemName: item.itemName.trim(),
+        selectedVariant: item.selectedVariant ? item.selectedVariant.trim() : null,
         itemDescription: item.itemDescription ? item.itemDescription.trim() : null,
         category: item.category ? item.category.trim() : "General",
         itemType: item.itemType === "service" ? "service" : "product",
@@ -478,15 +497,16 @@ export async function updateQuotation(req, res) {
       await conn.query(
         `INSERT INTO quotation_items (
           id, quotation_id, product_service_id, item_name_snapshot,
-          item_description, category_snapshot, item_type, is_custom,
+          item_description, variant_snapshot, category_snapshot, item_type, is_custom,
           quantity, base_price, final_unit_price, price_adjustment_reason, subtotal
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           item.id,
           id,
           item.productServiceId,
           item.itemName,
           item.itemDescription,
+          item.selectedVariant,
           item.category,
           item.itemType,
           item.isCustom,
@@ -650,16 +670,17 @@ export async function acceptAndConvertToOrder(req, res) {
       await conn.query(
         `INSERT INTO order_items (
           id, order_id, product_service_id, item_name_snapshot,
-          item_description, category_snapshot, item_type, is_custom,
+          item_description, variant_snapshot, category_snapshot, item_type, is_custom,
           quantity, base_price, final_unit_price, price_adjustment_reason,
           subtotal, quantity_completed, production_progress, production_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'pending')`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'pending')`,
         [
           orderItemId,
           orderId,
           it.product_service_id,
           it.item_name_snapshot,
           it.item_description,
+          it.variant_snapshot,
           it.category_snapshot,
           it.item_type,
           it.is_custom,
@@ -676,6 +697,7 @@ export async function acceptAndConvertToOrder(req, res) {
         orderId,
         productServiceId: it.product_service_id,
         itemName: it.item_name_snapshot,
+        selectedVariant: it.variant_snapshot || null,
         itemDescription: it.item_description || "",
         category: it.category_snapshot || "General",
         itemType: it.item_type,
@@ -770,4 +792,3 @@ export async function acceptAndConvertToOrder(req, res) {
     conn.release();
   }
 }
-

@@ -2,6 +2,36 @@
 import pool from "../database/db.js";
 import crypto from "crypto";
 
+function parseVariants(value) {
+  if (!value) return [];
+  const variants = typeof value === "string" ? JSON.parse(value) : value;
+  if (!Array.isArray(variants)) return [];
+  return variants.map((variant) => ({
+    name: String(variant.name || ""),
+    price: Number(variant.price),
+  }));
+}
+
+function validateVariants(value) {
+  if (value === undefined) return { valid: true, variants: [] };
+  if (!Array.isArray(value)) return { valid: false, variants: [] };
+
+  const names = new Set();
+  const variants = [];
+  for (const variant of value) {
+    const name = typeof variant?.name === "string" ? variant.name.trim() : "";
+    const price = Number(variant?.price);
+    if (!name || name.length > 150 || !Number.isFinite(price) || price < 0) {
+      return { valid: false, variants: [] };
+    }
+    const normalizedName = name.toLowerCase();
+    if (names.has(normalizedName)) return { valid: false, variants: [] };
+    names.add(normalizedName);
+    variants.push({ name, price });
+  }
+  return { valid: true, variants };
+}
+
 // GET /api/catalog
 // Fetches catalog items. If employee or unauthenticated, filters to active only.
 export async function getCatalogItems(req, res) {
@@ -16,6 +46,7 @@ export async function getCatalogItems(req, res) {
         p.type,
         CAST(p.base_price AS DOUBLE) AS basePrice,
         CAST(p.default_unit_price AS DOUBLE) AS defaultUnitPrice,
+        p.variants AS variants,
         p.description,
         p.image_url AS imageUrl,
         p.is_stock_item AS isStockItem,
@@ -49,7 +80,7 @@ export async function getCatalogItems(req, res) {
     query += ` ORDER BY p.type ASC, p.name ASC`;
 
     const [rows] = await pool.query(query, params);
-    res.json(rows);
+    res.json(rows.map((row) => ({ ...row, variants: parseVariants(row.variants) })));
   } catch (err) {
     console.error("getCatalogItems error:", err);
     res.status(500).json({ message: "Failed to fetch catalog items" });
@@ -63,6 +94,7 @@ export async function createCatalogItem(req, res) {
       name,
       type = "product",
       basePrice = 0,
+      variants = [],
       description = "",
       imageUrl = null,
       categoryId = null,
@@ -76,6 +108,10 @@ export async function createCatalogItem(req, res) {
 
     if (type !== "product" && type !== "service") {
       return res.status(400).json({ message: "Type must be either 'product' or 'service'" });
+    }
+    const validatedVariants = validateVariants(variants);
+    if (!validatedVariants.valid) {
+      return res.status(400).json({ message: "Each option must have a unique name and a valid non-negative price." });
     }
 
     const price = Math.max(0, Number(basePrice) || 0);
@@ -96,8 +132,8 @@ export async function createCatalogItem(req, res) {
 
     await pool.query(
       `INSERT INTO products (
-        id, category_id, type, name, base_price, default_unit_price, description, image_url, is_stock_item, is_active
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id, category_id, type, name, base_price, default_unit_price, variants, description, image_url, is_stock_item, is_active
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
       [
         id,
         finalCategoryId,
@@ -105,6 +141,7 @@ export async function createCatalogItem(req, res) {
         name.trim(),
         price,
         price,
+        JSON.stringify(validatedVariants.variants),
         description ? description.trim() : null,
         imageUrl || null,
         Boolean(isStockItem),
@@ -119,6 +156,7 @@ export async function createCatalogItem(req, res) {
         p.type,
         CAST(p.base_price AS DOUBLE) AS basePrice,
         CAST(p.default_unit_price AS DOUBLE) AS defaultUnitPrice,
+        p.variants AS variants,
         p.description,
         p.image_url AS imageUrl,
         p.is_stock_item AS isStockItem,
@@ -131,7 +169,7 @@ export async function createCatalogItem(req, res) {
       [id]
     );
 
-    res.status(201).json(createdRows[0]);
+    res.status(201).json({ ...createdRows[0], variants: parseVariants(createdRows[0].variants) });
   } catch (err) {
     console.error("createCatalogItem error:", err);
     res.status(500).json({ message: "Failed to create catalog item" });
@@ -146,6 +184,7 @@ export async function updateCatalogItem(req, res) {
       name,
       type,
       basePrice,
+      variants,
       description,
       imageUrl,
       categoryId,
@@ -162,6 +201,12 @@ export async function updateCatalogItem(req, res) {
     const newName = name !== undefined ? name.trim() : current.name;
     const newType = type !== undefined ? type : current.type;
     const newPrice = basePrice !== undefined ? Math.max(0, Number(basePrice) || 0) : Number(current.base_price);
+    const validatedVariants = variants === undefined
+      ? { valid: true, variants: parseVariants(current.variants) }
+      : validateVariants(variants);
+    if (!validatedVariants.valid) {
+      return res.status(400).json({ message: "Each option must have a unique name and a valid non-negative price." });
+    }
     const newDesc = description !== undefined ? description : current.description;
     const newImageUrl = imageUrl !== undefined ? imageUrl : current.image_url;
     const newStock = isStockItem !== undefined ? Boolean(isStockItem) : Boolean(current.is_stock_item);
@@ -174,6 +219,7 @@ export async function updateCatalogItem(req, res) {
         type = ?,
         base_price = ?,
         default_unit_price = ?,
+        variants = ?,
         description = ?,
         image_url = ?,
         category_id = ?,
@@ -185,6 +231,7 @@ export async function updateCatalogItem(req, res) {
         newType,
         newPrice,
         newPrice,
+        JSON.stringify(validatedVariants.variants),
         newDesc,
         newImageUrl,
         newCatId,
@@ -201,6 +248,7 @@ export async function updateCatalogItem(req, res) {
         p.type,
         CAST(p.base_price AS DOUBLE) AS basePrice,
         CAST(p.default_unit_price AS DOUBLE) AS defaultUnitPrice,
+        p.variants AS variants,
         p.description,
         p.image_url AS imageUrl,
         p.is_stock_item AS isStockItem,
@@ -213,7 +261,7 @@ export async function updateCatalogItem(req, res) {
       [id]
     );
 
-    res.json(updatedRows[0]);
+    res.json({ ...updatedRows[0], variants: parseVariants(updatedRows[0].variants) });
   } catch (err) {
     console.error("updateCatalogItem error:", err);
     res.status(500).json({ message: "Failed to update catalog item" });
