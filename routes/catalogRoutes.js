@@ -5,6 +5,7 @@ import {
   createCatalogItem,
   updateCatalogItem,
   toggleCatalogItemStatus,
+  deleteCatalogItem,
 } from "../controllers/catalogController.js";
 import { protect, requireAdmin } from "../middleware/authMiddleWare.js";
 
@@ -13,7 +14,7 @@ const router = express.Router();
 router.get("/", protect, getCatalogItems);
 router.post("/", protect, requireAdmin, createCatalogItem);
 router.put("/:id", protect, requireAdmin, updateCatalogItem);
+router.delete("/:id", protect, requireAdmin, deleteCatalogItem);
 router.patch("/:id/status", protect, requireAdmin, toggleCatalogItemStatus);
 
 export default router;
-

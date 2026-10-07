@@ -294,3 +294,19 @@ export async function toggleCatalogItemStatus(req, res) {
     res.status(500).json({ message: "Failed to toggle item status" });
   }
 }
+
+// DELETE /api/catalog/:id (Admin only)
+export async function deleteCatalogItem(req, res) {
+  try {
+    const { id } = req.params;
+    const [result] = await pool.query("DELETE FROM products WHERE id = ?", [id]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: "Catalog item not found" });
+    }
+
+    res.json({ id, message: "Catalog item deleted" });
+  } catch (err) {
+    console.error("deleteCatalogItem error:", err);
+    res.status(500).json({ message: "Failed to delete catalog item" });
+  }
+}
