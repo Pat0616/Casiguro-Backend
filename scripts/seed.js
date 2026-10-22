@@ -48,18 +48,33 @@ const RAW_ORDERS = [
   { customerName: "Josephine Garcia", contactNumber: "0917 552 8810", product: "Custom T-Shirts School", category: "Apparel", orderType: "custom", quantity: 90, quantityCompleted: 90, unitPrice: 200, amountPaid: 18000, status: "completed", notes: "Fiesta committee shirts.", dateOrdered: "2025-11-15", dueDate: "2025-12-01", dateCompleted: "2025-11-28" },
 ];
 
+// orderIndex points into RAW_ORDERS
 const RAW_NOTIFICATIONS = [
-  { type: "detail_update", user: "Djinn Zedster", orderRef: "TXN-2026-0012", customerName: "Noel Santiago", detail: "Quantity Completed changed from 500 → 650", minutesAgo: 10 },
-  { type: "status_update", user: "Patrick Pagdanganan", orderRef: "TXN-2026-0002", customerName: "Rico Fernandez", detail: "Order Status changed from In Production → Ready for Pickup", minutesAgo: 45 },
-  { type: "new_order", user: "Djinn Zedster", orderRef: "TXN-2026-0011", customerName: "Grace Lim", detail: "New Custom Order created — Custom Tumblers × 120", minutesAgo: 95 },
-  { type: "detail_update", user: "Patrick Pagdanganan", orderRef: "TXN-2026-0001", customerName: "Marites Villanueva", detail: "Amount Paid increased from ₱10,000.00 → ₱15,000.00", minutesAgo: 160 },
-  { type: "new_order", user: "Patrick Pagdanganan", orderRef: "TXN-2026-0015", customerName: "Josephine Garcia", detail: "New Stock Order created — Bond Paper (Reams) × 25", minutesAgo: 300 },
-  { type: "status_update", user: "Djinn Zedster", orderRef: "TXN-2026-0006", customerName: "Danilo Cruz", detail: "Order Status changed from In Production → Ready for Pickup", minutesAgo: 480 },
-  { type: "detail_update", user: "Patrick Pagdanganan", orderRef: "TXN-2026-0004", customerName: "Joseph Manalo", detail: "Unit Price changed from ₱30.00 → ₱35.00", minutesAgo: 620 },
-  { type: "status_update", user: "Patrick Pagdanganan", orderRef: "TXN-2026-0018", customerName: "Luisa Fernandez", detail: "Order Status changed from Ready for Pickup → Completed", minutesAgo: 1500 },
-  { type: "new_order", user: "Djinn Zedster", orderRef: "TXN-2026-0009", customerName: "Ella Mendoza", detail: "New Custom Order created — ID Lace & Holder × 400", minutesAgo: 2100 },
-  { type: "detail_update", user: "Patrick Pagdanganan", orderRef: "TXN-2026-0013", customerName: "Michael Domingo", detail: "Quantity Completed changed from 0 → 5", minutesAgo: 2600 },
+  { type: "detail_update", user: "Djinn Zedster", orderIndex: 11, customerName: "Noel Santiago", detail: "Quantity Completed changed from 500 → 650", minutesAgo: 10 },
+  { type: "status_update", user: "Patrick Pagdanganan", orderIndex: 1, customerName: "Rico Fernandez", detail: "Order Status changed from In Production → Ready for Pickup", minutesAgo: 45 },
+  { type: "new_order", user: "Djinn Zedster", orderIndex: 10, customerName: "Grace Lim", detail: "New Custom Order created — Custom Tumblers × 120", minutesAgo: 95 },
+  { type: "detail_update", user: "Patrick Pagdanganan", orderIndex: 0, customerName: "Marites Villanueva", detail: "Amount Paid increased from ₱10,000.00 → ₱15,000.00", minutesAgo: 160 },
+  { type: "new_order", user: "Patrick Pagdanganan", orderIndex: 14, customerName: "Josephine Garcia", detail: "New Stock Order created — Bond Paper (Reams) × 25", minutesAgo: 300 },
+  { type: "status_update", user: "Djinn Zedster", orderIndex: 5, customerName: "Danilo Cruz", detail: "Order Status changed from In Production → Ready for Pickup", minutesAgo: 480 },
+  { type: "detail_update", user: "Patrick Pagdanganan", orderIndex: 3, customerName: "Joseph Manalo", detail: "Unit Price changed from ₱30.00 → ₱35.00", minutesAgo: 620 },
+  { type: "status_update", user: "Patrick Pagdanganan", orderIndex: 17, customerName: "Luisa Fernandez", detail: "Order Status changed from Ready for Pickup → Completed", minutesAgo: 1500 },
+  { type: "new_order", user: "Djinn Zedster", orderIndex: 8, customerName: "Ella Mendoza", detail: "New Custom Order created — ID Lace & Holder × 400", minutesAgo: 2100 },
+  { type: "detail_update", user: "Patrick Pagdanganan", orderIndex: 12, customerName: "Michael Domingo", detail: "Quantity Completed changed from 0 → 5", minutesAgo: 2600 },
 ];
+
+// Seeded orders are treated as created on their order date, so SOA numbers run per month in date order
+function assignSoaNumbers(rawOrders) {
+  const counters = new Map();
+  const soaNumbers = new Array(rawOrders.length);
+  const byDate = rawOrders.map((_, i) => i).sort((a, b) => rawOrders[a].dateOrdered.localeCompare(rawOrders[b].dateOrdered) || a - b);
+  for (const i of byDate) {
+    const period = rawOrders[i].dateOrdered.slice(0, 7);
+    const seq = (counters.get(period) || 0) + 1;
+    counters.set(period, seq);
+    soaNumbers[i] = `${period}-${seq}`;
+  }
+  return { soaNumbers, counters };
+}
 
 async function seed() {
   console.log("Seeding database...");
@@ -102,13 +117,13 @@ async function seed() {
   const defaultUserId = users.length > 0 ? users[0].id : null;
 
   // 4. Seed Orders (if empty)
+  const { soaNumbers, counters } = assignSoaNumbers(RAW_ORDERS);
   const [existingOrders] = await pool.query("SELECT COUNT(*) as count FROM orders");
   if (existingOrders[0].count === 0) {
     console.log("Seeding orders table...");
     for (let i = 0; i < RAW_ORDERS.length; i++) {
       const o = RAW_ORDERS[i];
       const id = crypto.randomUUID();
-      const refNo = `TXN-${o.dateOrdered.slice(0, 4)}-${String(i + 1).padStart(4, "0")}`;
       const customerId = customerMap.get(o.customerName);
       const categoryId = categoryMap.get(o.category);
       const totalPrice = o.quantity * o.unitPrice;
@@ -117,14 +132,15 @@ async function seed() {
 
       await pool.query(
         `INSERT INTO orders (
-          id, ref_no, customer_id, category_id, product_name_snapshot,
+          id, soa_no, soa_date, customer_id, category_id, product_name_snapshot,
           order_type, quantity, quantity_completed, unit_price, total_price,
           amount_paid, balance, payment_status, status, notes,
-          date_ordered, due_date, date_completed, created_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          date_ordered, due_date, date_completed, created_by, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
-          refNo,
+          soaNumbers[i],
+          o.dateOrdered,
           customerId,
           categoryId,
           o.product,
@@ -142,7 +158,14 @@ async function seed() {
           o.dueDate,
           o.dateCompleted || null,
           defaultUserId,
+          `${o.dateOrdered} 09:00:00`,
         ]
+      );
+    }
+    for (const [period, lastSeq] of counters) {
+      await pool.query(
+        "INSERT INTO soa_counters (period, last_seq) VALUES (?, ?) ON DUPLICATE KEY UPDATE last_seq = GREATEST(last_seq, VALUES(last_seq))",
+        [period, lastSeq]
       );
     }
     console.log(`Seeded ${RAW_ORDERS.length} orders.`);
@@ -162,7 +185,8 @@ async function seed() {
       const matchingUser = users.find(u => u.full_name.toLowerCase().includes(n.user.toLowerCase())) || users[0];
       const userId = matchingUser ? matchingUser.id : null;
       // Try to find matching order ID
-      const [orderRow] = await pool.query("SELECT id FROM orders WHERE ref_no = ?", [n.orderRef]);
+      const orderRef = soaNumbers[n.orderIndex];
+      const [orderRow] = await pool.query("SELECT id FROM orders WHERE soa_no = ?", [orderRef]);
       const orderId = orderRow.length > 0 ? orderRow[0].id : null;
       const customerId = customerMap.get(n.customerName) || null;
 
@@ -176,7 +200,7 @@ async function seed() {
           userId,
           n.user,
           orderId,
-          n.orderRef,
+          orderRef,
           customerId,
           n.customerName,
           n.type,

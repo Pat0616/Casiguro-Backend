@@ -2,6 +2,42 @@
 import pool from "../database/db.js";
 import crypto from "crypto";
 import { emitOrderCreated, emitOrderUpdated, emitNotification } from "../websocket/socket.js";
+import { DOCUMENT_COLUMNS, DOCUMENT_LABELS, generateSoaNumber, parseDocumentFields } from "../utils/orderDocuments.js";
+
+const ORDER_SELECT = `
+  SELECT
+    o.id,
+    o.soa_no AS soaNo,
+    o.soa_date AS soaDate,
+    o.pr_no AS prNo,
+    o.po_no AS poNo,
+    o.si_or_no AS siOrNo,
+    o.si_or_date AS siOrDate,
+    o.dr_no AS drNo,
+    o.dr_date AS drDate,
+    o.quotation_id AS quotationId,
+    COALESCE(c.full_name, '') AS customerName,
+    COALESCE(c.contact_number, '') AS contactNumber,
+    o.product_name_snapshot AS product,
+    COALESCE(cat.name, 'General') AS category,
+    o.order_type AS orderType,
+    o.quantity,
+    o.quantity_completed AS quantityCompleted,
+    o.overall_progress AS overallProgress,
+    CAST(o.unit_price AS DOUBLE) AS unitPrice,
+    CAST(o.total_price AS DOUBLE) AS totalPrice,
+    CAST(o.amount_paid AS DOUBLE) AS amountPaid,
+    CAST(o.balance AS DOUBLE) AS balance,
+    o.payment_status AS paymentStatus,
+    o.status,
+    COALESCE(o.notes, '') AS notes,
+    o.date_ordered AS dateOrdered,
+    o.due_date AS dueDate,
+    o.date_completed AS dateCompleted
+  FROM orders o
+  LEFT JOIN customers c ON o.customer_id = c.id
+  LEFT JOIN categories cat ON o.category_id = cat.id
+`;
 
 const STATUS_LABELS = {
   pending: "Pending",
@@ -70,34 +106,7 @@ async function attachItemsToOrders(orders) {
 // GET /api/orders
 export async function getOrders(req, res) {
   try {
-    const [rows] = await pool.query(`
-      SELECT
-        o.id,
-        o.ref_no AS refNo,
-        o.quotation_id AS quotationId,
-        COALESCE(c.full_name, '') AS customerName,
-        COALESCE(c.contact_number, '') AS contactNumber,
-        o.product_name_snapshot AS product,
-        COALESCE(cat.name, 'General') AS category,
-        o.order_type AS orderType,
-        o.quantity,
-        o.quantity_completed AS quantityCompleted,
-        o.overall_progress AS overallProgress,
-        CAST(o.unit_price AS DOUBLE) AS unitPrice,
-        CAST(o.total_price AS DOUBLE) AS totalPrice,
-        CAST(o.amount_paid AS DOUBLE) AS amountPaid,
-        CAST(o.balance AS DOUBLE) AS balance,
-        o.payment_status AS paymentStatus,
-        o.status,
-        COALESCE(o.notes, '') AS notes,
-        o.date_ordered AS dateOrdered,
-        o.due_date AS dueDate,
-        o.date_completed AS dateCompleted
-      FROM orders o
-      LEFT JOIN customers c ON o.customer_id = c.id
-      LEFT JOIN categories cat ON o.category_id = cat.id
-      ORDER BY o.date_ordered DESC, o.created_at DESC
-    `);
+    const [rows] = await pool.query(`${ORDER_SELECT} ORDER BY o.date_ordered DESC, o.created_at DESC`);
 
     const ordersWithItems = await attachItemsToOrders(rows);
     res.json(ordersWithItems);
@@ -111,37 +120,7 @@ export async function getOrders(req, res) {
 export async function getOrderById(req, res) {
   try {
     const { id } = req.params;
-    const [rows] = await pool.query(
-      `
-      SELECT
-        o.id,
-        o.ref_no AS refNo,
-        o.quotation_id AS quotationId,
-        COALESCE(c.full_name, '') AS customerName,
-        COALESCE(c.contact_number, '') AS contactNumber,
-        o.product_name_snapshot AS product,
-        COALESCE(cat.name, 'General') AS category,
-        o.order_type AS orderType,
-        o.quantity,
-        o.quantity_completed AS quantityCompleted,
-        o.overall_progress AS overallProgress,
-        CAST(o.unit_price AS DOUBLE) AS unitPrice,
-        CAST(o.total_price AS DOUBLE) AS totalPrice,
-        CAST(o.amount_paid AS DOUBLE) AS amountPaid,
-        CAST(o.balance AS DOUBLE) AS balance,
-        o.payment_status AS paymentStatus,
-        o.status,
-        COALESCE(o.notes, '') AS notes,
-        o.date_ordered AS dateOrdered,
-        o.due_date AS dueDate,
-        o.date_completed AS dateCompleted
-      FROM orders o
-      LEFT JOIN customers c ON o.customer_id = c.id
-      LEFT JOIN categories cat ON o.category_id = cat.id
-      WHERE o.id = ?
-    `,
-      [id]
-    );
+    const [rows] = await pool.query(`${ORDER_SELECT} WHERE o.id = ?`, [id]);
 
     if (rows.length === 0) {
       return res.status(404).json({ message: "Order not found" });
@@ -180,6 +159,13 @@ export async function createOrder(req, res) {
       return res.status(400).json({ message: "Customer name is required" });
     }
 
+    const { fields: parsedDocuments, error: documentError } = parseDocumentFields(req.body);
+    if (documentError) {
+      await conn.rollback();
+      return res.status(400).json({ message: documentError });
+    }
+    const documents = Object.fromEntries(Object.keys(DOCUMENT_COLUMNS).map((key) => [key, parsedDocuments[key] ?? null]));
+
     // 1. Resolve Customer
     let customerId = null;
     const [custRows] = await conn.query("SELECT id, contact_number FROM customers WHERE full_name = ?", [customerName.trim()]);
@@ -208,18 +194,11 @@ export async function createOrder(req, res) {
       }
     }
 
-    // 3. Generate Reference Number
+    // 3. Generate SOA Number
     const todayStr = new Date().toISOString().slice(0, 10);
     const dateOrdered = rawDateOrdered || todayStr;
     const dueDate = rawDueDate || dateOrdered;
-    const year = dateOrdered.slice(0, 4) || new Date().getFullYear();
-    const [countRows] = await conn.query("SELECT COUNT(*) AS total FROM orders WHERE ref_no LIKE ?", [`TXN-${year}-%`]);
-    let nextNum = (countRows[0]?.total || 0) + 1;
-    let refNo = `TXN-${year}-${String(nextNum).padStart(4, "0")}`;
-    const [existingRef] = await conn.query("SELECT id FROM orders WHERE ref_no = ?", [refNo]);
-    if (existingRef.length > 0) {
-      refNo = `TXN-${year}-${String(nextNum + Math.floor(Math.random() * 1000)).padStart(4, "0")}`;
-    }
+    const { soaNo, soaDate } = await generateSoaNumber(conn);
 
     // 4. Determine items
     let preparedItems = [];
@@ -298,15 +277,23 @@ export async function createOrder(req, res) {
     // 5. Insert Order
     await conn.query(
       `INSERT INTO orders (
-        id, ref_no, customer_id, category_id, product_name_snapshot,
+        id, soa_no, soa_date, pr_no, po_no, si_or_no, si_or_date, dr_no, dr_date,
+        customer_id, category_id, product_name_snapshot,
         order_type, quantity, quantity_completed, overall_progress,
         unit_price, total_price, amount_paid, balance,
         payment_status, status, notes,
         date_ordered, due_date, date_completed, created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         orderId,
-        refNo,
+        soaNo,
+        soaDate,
+        documents.prNo,
+        documents.poNo,
+        documents.siOrNo,
+        documents.siOrDate,
+        documents.drNo,
+        documents.drDate,
         customerId,
         categoryId,
         productNameSnapshot,
@@ -374,7 +361,7 @@ export async function createOrder(req, res) {
         userId,
         userName,
         orderId,
-        refNo,
+        soaNo,
         customerId,
         customerName.trim(),
         notifDetail,
@@ -386,7 +373,9 @@ export async function createOrder(req, res) {
 
     const createdOrder = {
       id: orderId,
-      refNo,
+      soaNo,
+      soaDate,
+      ...documents,
       customerName: customerName.trim(),
       contactNumber: contactNumber ? contactNumber.trim() : "",
       product: productNameSnapshot,
@@ -412,7 +401,7 @@ export async function createOrder(req, res) {
       id: notifId,
       type: "new_order",
       user: userName,
-      orderRef: refNo,
+      orderRef: soaNo,
       customerName: customerName.trim(),
       detail: notifDetail,
       timestamp: now,
@@ -509,35 +498,7 @@ export async function updateOrder(req, res) {
       ]
     );
 
-    const [updatedOrderRows] = await pool.query(
-      `SELECT
-        o.id,
-        o.ref_no AS refNo,
-        o.quotation_id AS quotationId,
-        COALESCE(c.full_name, '') AS customerName,
-        COALESCE(c.contact_number, '') AS contactNumber,
-        o.product_name_snapshot AS product,
-        COALESCE(cat.name, 'General') AS category,
-        o.order_type AS orderType,
-        o.quantity,
-        o.quantity_completed AS quantityCompleted,
-        o.overall_progress AS overallProgress,
-        CAST(o.unit_price AS DOUBLE) AS unitPrice,
-        CAST(o.total_price AS DOUBLE) AS totalPrice,
-        CAST(o.amount_paid AS DOUBLE) AS amountPaid,
-        CAST(o.balance AS DOUBLE) AS balance,
-        o.payment_status AS paymentStatus,
-        o.status,
-        COALESCE(o.notes, '') AS notes,
-        o.date_ordered AS dateOrdered,
-        o.due_date AS dueDate,
-        o.date_completed AS dateCompleted
-      FROM orders o
-      LEFT JOIN customers c ON o.customer_id = c.id
-      LEFT JOIN categories cat ON o.category_id = cat.id
-      WHERE o.id = ?`,
-      [id]
-    );
+    const [updatedOrderRows] = await pool.query(`${ORDER_SELECT} WHERE o.id = ?`, [id]);
 
     const [fullOrder] = await attachItemsToOrders(updatedOrderRows);
     emitOrderUpdated(fullOrder);
@@ -546,6 +507,91 @@ export async function updateOrder(req, res) {
   } catch (err) {
     console.error("updateOrder error:", err);
     res.status(500).json({ message: "Failed to update order" });
+  }
+}
+
+// PUT /api/orders/:id/documents
+// OPTIONAL REFERENCE DOCUMENTS (PR, PO, SI/OR, DR) — SOA No/Date are system-assigned and never edited here
+export async function updateOrderDocuments(req, res) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const { id } = req.params;
+
+    const { fields, error } = parseDocumentFields(req.body);
+    if (error) {
+      await conn.rollback();
+      return res.status(400).json({ message: error });
+    }
+
+    const [orderRows] = await conn.query(
+      `SELECT o.*, COALESCE(c.full_name, '') AS customerName
+      FROM orders o
+      LEFT JOIN customers c ON o.customer_id = c.id
+      WHERE o.id = ? FOR UPDATE`,
+      [id]
+    );
+    if (orderRows.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    const order = orderRows[0];
+    const changedKeys = Object.keys(fields).filter((key) => (order[DOCUMENT_COLUMNS[key]] ?? null) !== fields[key]);
+
+    const userId = req.user?.id || null;
+    const userName = req.user?.full_name || "Staff";
+    let createdNotif = null;
+
+    if (changedKeys.length > 0) {
+      await conn.query(
+        `UPDATE orders SET ${changedKeys.map((key) => `${DOCUMENT_COLUMNS[key]} = ?`).join(", ")}, updated_by = ? WHERE id = ?`,
+        [...changedKeys.map((key) => fields[key]), userId, id]
+      );
+
+      const notifId = crypto.randomUUID();
+      const detail = `Reference documents updated for SOA ${order.soa_no}: ${changedKeys
+        .map((key) => `${DOCUMENT_LABELS[key]} ${fields[key] ? `set to ${fields[key]}` : "cleared"}`)
+        .join(", ")}`;
+      const now = new Date();
+
+      await conn.query(
+        `INSERT INTO notifications (
+          id, user_id, user_name, order_id, order_ref, customer_id, customer_name,
+          notification_type, message, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'detail_update', ?, ?)`,
+        [notifId, userId, userName, id, order.soa_no, order.customer_id, order.customerName, detail, now]
+      );
+
+      createdNotif = {
+        id: notifId,
+        type: "detail_update",
+        user: userName,
+        orderRef: order.soa_no,
+        customerName: order.customerName,
+        detail,
+        timestamp: now,
+        readAt: null,
+      };
+    }
+
+    await conn.commit();
+
+    const [updatedOrderRows] = await pool.query(`${ORDER_SELECT} WHERE o.id = ?`, [id]);
+    const [fullOrder] = await attachItemsToOrders(updatedOrderRows);
+
+    if (createdNotif) {
+      emitOrderUpdated(fullOrder);
+      emitNotification(createdNotif);
+    }
+
+    res.json(fullOrder);
+  } catch (err) {
+    await conn.rollback();
+    console.error("updateOrderDocuments error:", err);
+    res.status(500).json({ message: "Failed to update order documents" });
+  } finally {
+    conn.release();
   }
 }
 
@@ -656,49 +702,21 @@ export async function updateItemProduction(req, res) {
       const notifId = crypto.randomUUID();
       const oldLabel = STATUS_LABELS[order.status] || order.status;
       const newLabel = STATUS_LABELS[derivedStatus] || derivedStatus;
-      const detail = `Order ${order.ref_no} production status changed from ${oldLabel} to ${newLabel} (${overallProgress}% completed)`;
+      const detail = `SOA ${order.soa_no} production status changed from ${oldLabel} to ${newLabel} (${overallProgress}% completed)`;
 
       await conn.query(
         `INSERT INTO notifications (
           id, user_id, user_name, order_id, order_ref, customer_id, customer_name,
           notification_type, message, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, (SELECT full_name FROM customers WHERE id = ?), 'status_update', ?, NOW())`,
-        [notifId, userId, userName, id, order.ref_no, order.customer_id, order.customer_id, detail]
+        [notifId, userId, userName, id, order.soa_no, order.customer_id, order.customer_id, detail]
       );
     }
 
     await conn.commit();
 
     // Fetch updated order with items to return and broadcast
-    const [updatedOrderRows] = await pool.query(
-      `SELECT
-        o.id,
-        o.ref_no AS refNo,
-        o.quotation_id AS quotationId,
-        COALESCE(c.full_name, '') AS customerName,
-        COALESCE(c.contact_number, '') AS contactNumber,
-        o.product_name_snapshot AS product,
-        COALESCE(cat.name, 'General') AS category,
-        o.order_type AS orderType,
-        o.quantity,
-        o.quantity_completed AS quantityCompleted,
-        o.overall_progress AS overallProgress,
-        CAST(o.unit_price AS DOUBLE) AS unitPrice,
-        CAST(o.total_price AS DOUBLE) AS totalPrice,
-        CAST(o.amount_paid AS DOUBLE) AS amountPaid,
-        CAST(o.balance AS DOUBLE) AS balance,
-        o.payment_status AS paymentStatus,
-        o.status,
-        COALESCE(o.notes, '') AS notes,
-        o.date_ordered AS dateOrdered,
-        o.due_date AS dueDate,
-        o.date_completed AS dateCompleted
-      FROM orders o
-      LEFT JOIN customers c ON o.customer_id = c.id
-      LEFT JOIN categories cat ON o.category_id = cat.id
-      WHERE o.id = ?`,
-      [id]
-    );
+    const [updatedOrderRows] = await pool.query(`${ORDER_SELECT} WHERE o.id = ?`, [id]);
 
     const [fullOrder] = await attachItemsToOrders(updatedOrderRows);
     emitOrderUpdated(fullOrder);
@@ -768,48 +786,20 @@ export async function recordPayment(req, res) {
 
     // 3. Create persistent notification
     const notifId = crypto.randomUUID();
-    const notifDetail = `Payment of ${formatCurrency(amount)} recorded for Order ${order.ref_no} via ${paymentMethod}. New balance: ${formatCurrency(newBalance)}`;
+    const notifDetail = `Payment of ${formatCurrency(amount)} recorded for SOA ${order.soa_no} via ${paymentMethod}. New balance: ${formatCurrency(newBalance)}`;
 
     await conn.query(
       `INSERT INTO notifications (
         id, user_id, user_name, order_id, order_ref, customer_id, customer_name,
         notification_type, message, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, (SELECT full_name FROM customers WHERE id = ?), 'detail_update', ?, NOW())`,
-      [notifId, userId, userName, id, order.ref_no, order.customer_id, order.customer_id, notifDetail]
+      [notifId, userId, userName, id, order.soa_no, order.customer_id, order.customer_id, notifDetail]
     );
 
     await conn.commit();
 
     // Fetch updated order with items
-    const [updatedOrderRows] = await pool.query(
-      `SELECT
-        o.id,
-        o.ref_no AS refNo,
-        o.quotation_id AS quotationId,
-        COALESCE(c.full_name, '') AS customerName,
-        COALESCE(c.contact_number, '') AS contactNumber,
-        o.product_name_snapshot AS product,
-        COALESCE(cat.name, 'General') AS category,
-        o.order_type AS orderType,
-        o.quantity,
-        o.quantity_completed AS quantityCompleted,
-        o.overall_progress AS overallProgress,
-        CAST(o.unit_price AS DOUBLE) AS unitPrice,
-        CAST(o.total_price AS DOUBLE) AS totalPrice,
-        CAST(o.amount_paid AS DOUBLE) AS amountPaid,
-        CAST(o.balance AS DOUBLE) AS balance,
-        o.payment_status AS paymentStatus,
-        o.status,
-        COALESCE(o.notes, '') AS notes,
-        o.date_ordered AS dateOrdered,
-        o.due_date AS dueDate,
-        o.date_completed AS dateCompleted
-      FROM orders o
-      LEFT JOIN customers c ON o.customer_id = c.id
-      LEFT JOIN categories cat ON o.category_id = cat.id
-      WHERE o.id = ?`,
-      [id]
-    );
+    const [updatedOrderRows] = await pool.query(`${ORDER_SELECT} WHERE o.id = ?`, [id]);
 
     const [fullOrder] = await attachItemsToOrders(updatedOrderRows);
     emitOrderUpdated(fullOrder);

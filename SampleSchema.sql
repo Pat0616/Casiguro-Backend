@@ -156,11 +156,26 @@ CREATE TABLE IF NOT EXISTS quotation_items (
 ) ENGINE=InnoDB;
 
 -- ========================================================
+-- 6b. SOA COUNTERS (Monthly SOA sequence: period 'YYYY-MM' -> last number issued)
+-- ========================================================
+CREATE TABLE IF NOT EXISTS soa_counters (
+  period CHAR(7) PRIMARY KEY,
+  last_seq INT NOT NULL DEFAULT 0
+) ENGINE=InnoDB;
+
+-- ========================================================
 -- 7. ORDERS (Transactions, production state, and financials)
 -- ========================================================
 CREATE TABLE IF NOT EXISTS orders (
   id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
-  ref_no VARCHAR(50) UNIQUE NOT NULL,
+  soa_no VARCHAR(20) UNIQUE NOT NULL,       -- Statement of Account No, YYYY-MM-N (system-assigned)
+  soa_date DATE NOT NULL,                   -- Date the order was created (system-assigned)
+  pr_no VARCHAR(50) NULL,                   -- Customer's Purchase Request No
+  po_no VARCHAR(50) NULL,                   -- Customer's Purchase Order No
+  si_or_no VARCHAR(50) NULL,                -- Sales Invoice / Official Receipt No
+  si_or_date DATE NULL,
+  dr_no VARCHAR(50) NULL,                   -- Delivery Receipt No
+  dr_date DATE NULL,
   quotation_id CHAR(36),
 
   customer_id CHAR(36),
@@ -245,7 +260,7 @@ CREATE TABLE IF NOT EXISTS orders (
     ON DELETE SET NULL
     ON UPDATE CASCADE,
 
-  INDEX idx_orders_ref_no (ref_no),
+  INDEX idx_orders_soa_date (soa_date),
   INDEX idx_orders_quotation_id (quotation_id),
   INDEX idx_orders_status (status),
   INDEX idx_orders_payment_status (payment_status),

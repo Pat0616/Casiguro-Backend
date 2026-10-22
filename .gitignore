@@ -8,4 +8,5 @@ build/
 coverage/
 
 *.log
+backups/
 .DS_Store

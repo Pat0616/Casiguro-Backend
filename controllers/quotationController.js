@@ -2,6 +2,7 @@
 import pool from "../database/db.js";
 import crypto from "crypto";
 import { emitNotification, emitOrderCreated } from "../websocket/socket.js";
+import { generateSoaNumber } from "../utils/orderDocuments.js";
 
 // Helper to auto-mark expired quotations
 async function markExpiredQuotations() {
@@ -36,7 +37,7 @@ export async function getQuotations(req, res) {
         q.created_at AS createdAt,
         q.updated_at AS updatedAt,
         (SELECT o.id FROM orders o WHERE o.quotation_id = q.id LIMIT 1) AS convertedOrderId,
-        (SELECT o.ref_no FROM orders o WHERE o.quotation_id = q.id LIMIT 1) AS convertedOrderRef
+        (SELECT o.soa_no FROM orders o WHERE o.quotation_id = q.id LIMIT 1) AS convertedOrderRef
       FROM quotations q
       LEFT JOIN users u ON q.created_by = u.id
       WHERE 1=1
@@ -128,7 +129,7 @@ export async function getQuotationById(req, res) {
         q.created_at AS createdAt,
         q.updated_at AS updatedAt,
         (SELECT o.id FROM orders o WHERE o.quotation_id = q.id LIMIT 1) AS convertedOrderId,
-        (SELECT o.ref_no FROM orders o WHERE o.quotation_id = q.id LIMIT 1) AS convertedOrderRef
+        (SELECT o.soa_no FROM orders o WHERE o.quotation_id = q.id LIMIT 1) AS convertedOrderRef
       FROM quotations q
       LEFT JOIN users u ON q.created_by = u.id
       WHERE q.id = ?`,
@@ -616,15 +617,8 @@ export async function acceptAndConvertToOrder(req, res) {
       [req.user?.id || null, id]
     );
 
-    // 4. Generate Order Reference Number TXN-YYYY-XXXX
-    const year = new Date().getFullYear();
-    const [countRows] = await conn.query("SELECT COUNT(*) AS total FROM orders WHERE ref_no LIKE ?", [`TXN-${year}-%`]);
-    const nextNum = (countRows[0]?.total || 0) + 1;
-    let refNo = `TXN-${year}-${String(nextNum).padStart(4, "0")}`;
-    const [existingRef] = await conn.query("SELECT id FROM orders WHERE ref_no = ?", [refNo]);
-    if (existingRef.length > 0) {
-      refNo = `TXN-${year}-${String(nextNum + Math.floor(Math.random() * 1000)).padStart(4, "0")}`;
-    }
+    // 4. Generate SOA Number (YYYY-MM-N)
+    const { soaNo, soaDate } = await generateSoaNumber(conn);
 
     // 5. Compute order values
     const orderId = crypto.randomUUID();
@@ -641,14 +635,15 @@ export async function acceptAndConvertToOrder(req, res) {
     // 6. Insert Order
     await conn.query(
       `INSERT INTO orders (
-        id, ref_no, quotation_id, customer_id, product_name_snapshot,
+        id, soa_no, soa_date, quotation_id, customer_id, product_name_snapshot,
         order_type, quantity, quantity_completed, overall_progress,
         unit_price, total_price, amount_paid, balance,
         payment_status, status, notes, date_ordered, due_date, created_by
-      ) VALUES (?, ?, ?, ?, ?, 'custom', ?, 0, 0, ?, ?, 0.00, ?, 'unpaid', 'pending', ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, 'custom', ?, 0, 0, ?, ?, 0.00, ?, 'unpaid', 'pending', ?, ?, ?, ?)`,
       [
         orderId,
-        refNo,
+        soaNo,
+        soaDate,
         quote.id,
         quote.customer_id,
         primaryItemName,
@@ -715,7 +710,7 @@ export async function acceptAndConvertToOrder(req, res) {
 
     // 8. Create Notification
     const notifId = crypto.randomUUID();
-    const notifDetail = `Quotation ${quote.quote_no} accepted and converted to Order ${refNo} (Total: ₱${totalAmount.toLocaleString(
+    const notifDetail = `Quotation ${quote.quote_no} accepted and converted to Order SOA ${soaNo} (Total: ₱${totalAmount.toLocaleString(
       "en-PH",
       { minimumFractionDigits: 2 }
     )})`;
@@ -731,7 +726,7 @@ export async function acceptAndConvertToOrder(req, res) {
         userId,
         userName,
         orderId,
-        refNo,
+        soaNo,
         quote.customer_id,
         quote.customer_name,
         notifDetail,
@@ -743,7 +738,14 @@ export async function acceptAndConvertToOrder(req, res) {
 
     const createdOrder = {
       id: orderId,
-      refNo,
+      soaNo,
+      soaDate,
+      prNo: null,
+      poNo: null,
+      siOrNo: null,
+      siOrDate: null,
+      drNo: null,
+      drDate: null,
       quotationId: quote.id,
       customerName: quote.customer_name,
       contactNumber: quote.contact_number || "",
@@ -769,7 +771,7 @@ export async function acceptAndConvertToOrder(req, res) {
       id: notifId,
       type: "new_order",
       user: userName,
-      orderRef: refNo,
+      orderRef: soaNo,
       customerName: quote.customer_name,
       detail: notifDetail,
       timestamp: now,

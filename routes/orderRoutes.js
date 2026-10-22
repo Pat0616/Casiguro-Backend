@@ -5,6 +5,7 @@ import {
   getOrderById,
   createOrder,
   updateOrder,
+  updateOrderDocuments,
   updateItemProduction,
   recordPayment,
 } from "../controllers/orderController.js";
@@ -18,6 +19,7 @@ orderRouter.get("/", getOrders);
 orderRouter.get("/:id", getOrderById);
 orderRouter.post("/", createOrder);
 orderRouter.put("/:id", updateOrder);
+orderRouter.put("/:id/documents", updateOrderDocuments);
 orderRouter.put("/:id/production", updateItemProduction);
 orderRouter.post("/:id/payment", recordPayment);
 

@@ -7,6 +7,7 @@
     "start": "nodemon server.js",
     "migrate:catalog-images": "node scripts/migrate_catalog_images.js",
     "migrate:catalog-variants": "node scripts/migrate_catalog_variants.js",
+    "migrate:soa-numbers": "node scripts/migrate_soa_numbers.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "",
