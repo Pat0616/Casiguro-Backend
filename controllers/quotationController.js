@@ -3,6 +3,8 @@ import pool from "../database/db.js";
 import crypto from "crypto";
 import { emitNotification, emitOrderCreated } from "../websocket/socket.js";
 import { generateSoaNumber } from "../utils/orderDocuments.js";
+import { renderPdf } from "../utils/pdfRenderer.js";
+import { renderQuotationHtml } from "../templates/quotationTemplate.js";
 
 // Helper to auto-mark expired quotations
 async function markExpiredQuotations() {
@@ -166,6 +168,70 @@ export async function getQuotationById(req, res) {
   } catch (err) {
     console.error("getQuotationById error:", err);
     res.status(500).json({ message: "Failed to fetch quotation" });
+  }
+}
+
+// GET /api/quotations/:id/pdf  (?download=1 to save instead of view)
+// PRINTABLE PRICE QUOTATION — SOA and reference document fields are filled once the quote is converted to an order
+export async function getQuotationPdf(req, res) {
+  try {
+    const { id } = req.params;
+
+    const [quotes] = await pool.query(
+      `SELECT
+        q.quote_no AS quoteNo,
+        q.customer_name AS customerName,
+        COALESCE(q.contact_number, '') AS contactNumber,
+        CAST(q.total_amount AS DOUBLE) AS totalAmount,
+        COALESCE(u.full_name, '') AS preparedBy
+      FROM quotations q
+      LEFT JOIN users u ON q.created_by = u.id
+      WHERE q.id = ?`,
+      [id]
+    );
+    if (quotes.length === 0) {
+      return res.status(404).json({ message: "Quotation not found" });
+    }
+    const quotation = quotes[0];
+
+    const [items] = await pool.query(
+      `SELECT
+        item_name_snapshot AS itemName,
+        variant_snapshot AS selectedVariant,
+        quantity,
+        CAST(final_unit_price AS DOUBLE) AS finalUnitPrice,
+        CAST(subtotal AS DOUBLE) AS subtotal
+      FROM quotation_items
+      WHERE quotation_id = ?
+      ORDER BY id ASC`,
+      [id]
+    );
+
+    const [orders] = await pool.query(
+      `SELECT
+        soa_no AS soaNo, soa_date AS soaDate, pr_no AS prNo, po_no AS poNo,
+        si_or_no AS siOrNo, si_or_date AS siOrDate, dr_no AS drNo, dr_date AS drDate
+      FROM orders
+      WHERE quotation_id = ?
+      ORDER BY created_at ASC
+      LIMIT 1`,
+      [id]
+    );
+
+    const pdf = await renderPdf(renderQuotationHtml({ quotation, items, order: orders[0] || null }), { landscape: true });
+    const filename = `Quotation-${quotation.quoteNo}.pdf`.replace(/[^\w.-]/g, "_");
+    const disposition = req.query.download === "1" ? "attachment" : "inline";
+
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `${disposition}; filename="${filename}"`,
+      "Content-Length": pdf.length,
+      "Cache-Control": "no-store",
+    });
+    res.send(pdf);
+  } catch (err) {
+    console.error("getQuotationPdf error:", err);
+    res.status(500).json({ message: "Failed to generate quotation PDF" });
   }
 }
 
