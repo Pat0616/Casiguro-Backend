@@ -63,9 +63,23 @@ function formatUnitCost(n) {
   return Number(n || 0).toLocaleString("en-PH", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 }
 
+// Brand palette sampled from the logo swoosh; navy carries headings and prints well in grayscale
+const BRAND = {
+  navy: "#0f2e52",
+  cyan: "#1ba6e4",
+  magenta: "#e4007c",
+  purple: "#b67fc0",
+  yellow: "#ffe100",
+  ink: "#1e293b",
+  muted: "#64748b",
+  line: "#cbd5e1",
+  hairline: "#e2e8f0",
+  tint: "#f8fafc",
+};
+
 /**
  * @param {object} data
- * @param {object} data.quotation  quoteNo, customerName, contactNumber, totalAmount, preparedBy
+ * @param {object} data.quotation  quoteNo, customerName, contactNumber, totalAmount, preparedBy, validUntil
  * @param {object[]} data.items    itemName, selectedVariant, quantity, finalUnitPrice, subtotal
  * @param {object|null} data.order converted order's soaNo, soaDate, prNo, poNo, siOrNo, siOrDate, drNo, drDate
  */
@@ -73,27 +87,43 @@ export function renderQuotationHtml({ quotation, items, order }) {
   const logo = loadLogoDataUri();
   const doc = order || {};
 
-  const infoRows = [
-    ["CLIENT NAME:", quotation.customerName, "SOA NO.:", doc.soaNo, "S.I. NO./O.R. NO.:", doc.siOrNo],
-    ["ADDRESS:", "", "SOA DATE:", formatDocDate(doc.soaDate), "S.I./O.R. DATE:", formatDocDate(doc.siOrDate)],
-    ["CONTACT PERSON:", "", "P.R. NO.:", doc.prNo, "D.R. NO.:", doc.drNo],
-    ["CONTACT NO.:", quotation.contactNumber, "P.O. NO.:", doc.poNo, "D.R. DATE:", formatDocDate(doc.drDate)],
+  const clientFields = [
+    ["CLIENT NAME:", quotation.customerName],
+    ["ADDRESS:", ""],
+    ["CONTACT PERSON:", ""],
+    ["CONTACT NO.:", quotation.contactNumber],
   ];
+  const soaFields = [
+    ["SOA NO.:", doc.soaNo],
+    ["SOA DATE:", formatDocDate(doc.soaDate)],
+    ["P.R. NO.:", doc.prNo],
+    ["P.O. NO.:", doc.poNo],
+  ];
+  const receiptFields = [
+    ["S.I. NO./O.R. NO.:", doc.siOrNo],
+    ["S.I./O.R. DATE:", formatDocDate(doc.siOrDate)],
+    ["D.R. NO.:", doc.drNo],
+    ["D.R. DATE:", formatDocDate(doc.drDate)],
+  ];
+  const fieldRows = (fields) =>
+    fields
+      .map(([label, value]) => `<div class="field"><span class="label">${label}</span><span class="value">${escapeHtml(value)}</span></div>`)
+      .join("");
 
   const rowCount = Math.max(MIN_ITEM_ROWS, items.length);
   const itemRows = Array.from({ length: rowCount }, (_, i) => {
     const it = items[i];
     if (!it) {
-      return `<tr><td class="c">${i + 1}</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`;
+      return `<tr class="empty"><td class="c">${i + 1}</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`;
     }
     return `<tr>
       <td class="c">${i + 1}</td>
       <td></td>
-      <td class="c">${escapeHtml(it.itemName)}</td>
+      <td class="item">${escapeHtml(it.itemName)}</td>
       <td class="c">${escapeHtml(it.selectedVariant || "")}</td>
-      <td class="c">${escapeHtml(it.quantity)}</td>
-      <td class="r">${formatUnitCost(it.finalUnitPrice)}</td>
-      <td class="r">${formatMoney(it.subtotal)}</td>
+      <td class="c num">${escapeHtml(it.quantity)}</td>
+      <td class="r num">${formatUnitCost(it.finalUnitPrice)}</td>
+      <td class="r num">${formatMoney(it.subtotal)}</td>
     </tr>`;
   }).join("");
 
@@ -104,98 +134,127 @@ export function renderQuotationHtml({ quotation, items, order }) {
 <title>Price Quotation ${escapeHtml(quotation.quoteNo)}</title>
 <style>
   * { box-sizing: border-box; }
-  body { margin: 0; font-family: Calibri, Arial, sans-serif; font-size: 10.5pt; color: #000; }
-  .sheet { border: 1.5px solid #000; padding: 0 0 6px; }
+  body { margin: 0; font-family: "Segoe UI", Calibri, Arial, sans-serif; font-size: 9.5pt; color: ${BRAND.ink}; }
+  .items tr, .closing { break-inside: avoid; }
+  .brand-bar { height: 6px; background: linear-gradient(90deg, ${BRAND.magenta}, ${BRAND.purple} 35%, ${BRAND.yellow} 65%, ${BRAND.cyan}); }
+  .brand-bar.thin { height: 3px; }
+  .content { padding: 10px 22px 12px; }
 
-  .letterhead { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 12px 16px 2px; text-align: center; }
+  .letterhead { display: flex; flex-direction: column; align-items: center; gap: 3px; text-align: center; }
   ${logoCropCss()}
-  .logo-fallback { font-family: Arial, sans-serif; font-weight: 700; font-size: 18pt; color: #1aa3e8; }
-  .company-lines { font-size: 8pt; line-height: 1.6; }
-  h1 { font-family: "Arial Black", Arial, sans-serif; font-size: 18pt; text-align: center; margin: 8px 0 6px; letter-spacing: .3px; }
+  .logo-fallback { font-weight: 700; font-size: 18pt; color: ${BRAND.cyan}; }
+  .company-lines { font-size: 7.5pt; line-height: 1.55; color: ${BRAND.muted}; }
 
-  .info { width: 100%; border-collapse: collapse; border-top: 1.5px solid #000; }
-  .info td { padding: 1px 4px; font-weight: 700; font-size: 9.5pt; height: 16px; white-space: nowrap; }
-  .info .client { width: 52%; border-bottom: 1px solid #000; }
-  .info .client span { font-weight: 700; }
-  .info .lbl { width: 11%; }
-  .info .val { width: 12.5%; border-bottom: 1px solid #000; font-weight: 400; text-align: left; }
-  .info .gap { width: 1%; }
+  .title { display: flex; align-items: center; gap: 14px; margin: 8px 0 10px; }
+  .title::before, .title::after { content: ""; flex: 1; height: 1px; background: ${BRAND.line}; }
+  .title h1 { margin: 0; font-size: 17pt; font-weight: 800; letter-spacing: 4px; color: ${BRAND.navy}; }
+  .title .ref { display: block; margin-top: 1px; text-align: center; font-size: 7.5pt; letter-spacing: .5px; color: ${BRAND.muted}; }
 
-  .items { width: 100%; border-collapse: collapse; margin-top: 4px; }
-  .items th, .items td { border: 1px solid #000; padding: 1px 5px; height: 16px; font-size: 9.5pt; }
-  .items th { font-weight: 700; text-align: center; border-top: 1.5px solid #000; border-bottom: 1.5px solid #000; }
+  .info { display: grid; grid-template-columns: 1.45fr 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+  .panel { border: 1px solid ${BRAND.hairline}; border-radius: 5px; padding: 4px 10px 6px; background: #fff; }
+  .panel.tinted { background: ${BRAND.tint}; }
+  .field { display: flex; align-items: flex-end; gap: 6px; min-height: 19px; border-bottom: 1px solid ${BRAND.hairline}; }
+  .field:last-child { border-bottom: none; }
+  .field .label { flex-shrink: 0; font-size: 7.5pt; font-weight: 700; letter-spacing: .3px; color: ${BRAND.muted}; padding-bottom: 2px; }
+  .field .value { flex: 1; font-size: 9.5pt; font-weight: 600; color: ${BRAND.ink}; padding-bottom: 1px; }
+  .panel:first-child .field .label { width: 98px; }
+  .panel:not(:first-child) .field .label { width: 100px; }
+
+  .items { width: 100%; border-collapse: separate; border-spacing: 0; border: 1px solid ${BRAND.line}; border-radius: 5px; overflow: hidden; }
+  .items th { background: ${BRAND.navy}; color: #fff; font-size: 7.5pt; font-weight: 700; letter-spacing: .6px; padding: 5px 6px; text-align: center; }
+  .items td { padding: 0 8px; height: 19px; font-size: 9pt; border-top: 1px solid ${BRAND.hairline}; border-left: 1px solid ${BRAND.hairline}; }
+  .items td:first-child { border-left: none; }
+  .items tbody tr:nth-child(even) td { background: ${BRAND.tint}; }
   .items td.c { text-align: center; }
   .items td.r { text-align: right; }
-  .items .total td { border: none; font-weight: 700; padding-top: 3px; }
-  .items .total .amount { border-bottom: 3px double #000; text-align: right; }
+  .items td.item { font-weight: 600; }
+  .items .num { font-variant-numeric: tabular-nums; }
+  .items tr.empty td.c { color: #cbd5e1; }
 
-  .signatures { display: flex; justify-content: space-between; padding: 40px 110px 0 50px; font-weight: 700; font-size: 9.5pt; }
-  .sig { display: flex; flex-direction: column; }
-  .sig .name { margin-top: 30px; padding-left: 14px; font-weight: 400; min-height: 14px; }
-  .sig .line { border-top: 1px solid #000; margin-top: 2px; padding-top: 2px; white-space: nowrap; }
-  .sig.prepared .line { width: 400px; }
-  .sig.received { width: 200px; }
-  .note { font-size: 7pt; font-style: italic; padding: 22px 4px 0; }
+  .total-row { display: flex; justify-content: flex-end; margin-top: 8px; }
+  .total { display: flex; align-items: center; gap: 18px; padding: 6px 14px; border-radius: 5px;
+    background: #eaf6fd; border-left: 4px solid ${BRAND.cyan}; }
+  .total .label { font-size: 8pt; font-weight: 700; letter-spacing: 1px; color: ${BRAND.navy}; }
+  .total .amount { font-size: 13pt; font-weight: 800; color: ${BRAND.navy}; font-variant-numeric: tabular-nums; }
+
+  .signatures { display: flex; justify-content: space-between; padding: 18px 40px 0; }
+  .sig { width: 300px; }
+  .sig .heading { font-size: 7.5pt; font-weight: 700; letter-spacing: .6px; color: ${BRAND.muted}; }
+  .sig .name { margin-top: 26px; min-height: 15px; text-align: center; font-size: 9.5pt; font-weight: 700; color: ${BRAND.ink}; }
+  .sig .line { border-top: 1px solid ${BRAND.ink}; margin-top: 2px; padding-top: 3px; text-align: center;
+    font-size: 7pt; font-weight: 600; letter-spacing: .5px; color: ${BRAND.muted}; }
+
+  .footer { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; margin-top: 14px; padding-top: 6px;
+    border-top: 1px solid ${BRAND.hairline}; font-size: 7pt; color: ${BRAND.muted}; }
+  .footer .note { font-style: italic; }
+  .footer .validity { flex-shrink: 0; font-weight: 600; color: ${BRAND.navy}; }
 </style>
 </head>
 <body>
   <div class="sheet">
-    <div class="letterhead">
-      ${logo
-        ? `<div class="logo"><img src="${logo}" alt="${escapeHtml(COMPANY.name)}"></div>`
-        : `<div class="logo-fallback">${escapeHtml(COMPANY.name)}</div>`}
-      <div class="company-lines">${escapeHtml(COMPANY.address)}<br>${escapeHtml(COMPANY.contact)}</div>
-    </div>
-    <h1>PRICE QUOTATION</h1>
-
-    <table class="info">
-      ${infoRows
-        .map(
-          ([clientLabel, clientValue, midLabel, midValue, rightLabel, rightValue]) => `<tr>
-        <td class="client">${clientLabel} <span>${escapeHtml(clientValue)}</span></td>
-        <td class="gap"></td>
-        <td class="lbl">${midLabel}</td>
-        <td class="val">${escapeHtml(midValue)}</td>
-        <td class="gap"></td>
-        <td class="lbl">${rightLabel}</td>
-        <td class="val">${escapeHtml(rightValue)}</td>
-      </tr>`
-        )
-        .join("")}
-    </table>
-
-    <table class="items">
-      <colgroup>
-        <col style="width:4.5%"><col style="width:11%"><col style="width:33%"><col style="width:11.5%">
-        <col style="width:13%"><col style="width:13%"><col style="width:14%">
-      </colgroup>
-      <thead>
-        <tr><th>NO.</th><th>DATE (mm/dd/yy)</th><th>ITEM/DESCRIPTION</th><th>SIZE/UNIT</th><th>QUANTITY</th><th>UNIT COST</th><th>AMOUNT</th></tr>
-      </thead>
-      <tbody>
-        ${itemRows}
-        <tr class="total">
-          <td colspan="5"></td>
-          <td class="r">TOTAL AMOUNT</td>
-          <td class="amount">${formatMoney(quotation.totalAmount)}</td>
-        </tr>
-      </tbody>
-    </table>
-
-    <div class="signatures">
-      <div class="sig prepared">
-        <span>PREPARED BY:</span>
-        <span class="name">${escapeHtml((quotation.preparedBy || "").toUpperCase())}</span>
-        <span class="line">PRINT NAME AND SIGNATURE</span>
+    <div class="brand-bar"></div>
+    <div class="content">
+      <div class="letterhead">
+        ${logo
+          ? `<div class="logo"><img src="${logo}" alt="${escapeHtml(COMPANY.name)}"></div>`
+          : `<div class="logo-fallback">${escapeHtml(COMPANY.name)}</div>`}
+        <div class="company-lines">${escapeHtml(COMPANY.address)}<br>${escapeHtml(COMPANY.contact)}</div>
       </div>
-      <div class="sig received">
-        <span>RECEIVED BY:</span>
-        <span class="name"></span>
-        <span class="line">PRINT NAME AND SIGNATURE</span>
+
+      <div class="title">
+        <div>
+          <h1>PRICE QUOTATION</h1>
+          ${quotation.quoteNo ? `<span class="ref">Ref. No. ${escapeHtml(quotation.quoteNo)}</span>` : ""}
+        </div>
+      </div>
+
+      <div class="info">
+        <div class="panel">${fieldRows(clientFields)}</div>
+        <div class="panel tinted">${fieldRows(soaFields)}</div>
+        <div class="panel tinted">${fieldRows(receiptFields)}</div>
+      </div>
+
+      <table class="items">
+        <colgroup>
+          <col style="width:5%"><col style="width:11%"><col style="width:33%"><col style="width:11%">
+          <col style="width:11%"><col style="width:13%"><col style="width:16%">
+        </colgroup>
+        <thead>
+          <tr><th>NO.</th><th>DATE (mm/dd/yy)</th><th>ITEM/DESCRIPTION</th><th>SIZE/UNIT</th><th>QUANTITY</th><th>UNIT COST</th><th>AMOUNT</th></tr>
+        </thead>
+        <tbody>
+          ${itemRows}
+        </tbody>
+      </table>
+
+      <div class="total-row">
+        <div class="total">
+          <span class="label">TOTAL AMOUNT</span>
+          <span class="amount">₱ ${formatMoney(quotation.totalAmount)}</span>
+        </div>
+      </div>
+
+      <div class="closing">
+      <div class="signatures">
+        <div class="sig">
+          <div class="heading">PREPARED BY:</div>
+          <div class="name">${escapeHtml((quotation.preparedBy || "").toUpperCase())}</div>
+          <div class="line">PRINT NAME AND SIGNATURE</div>
+        </div>
+        <div class="sig">
+          <div class="heading">RECEIVED BY:</div>
+          <div class="name"></div>
+          <div class="line">PRINT NAME AND SIGNATURE</div>
+        </div>
+      </div>
+
+      <div class="footer">
+        <span class="note">For any questions and further clarifications, feel free to contact us. We look forward to our continued relationship!</span>
+        ${quotation.validUntil ? `<span class="validity">This quotation is valid until ${formatDocDate(quotation.validUntil)}.</span>` : ""}
+      </div>
       </div>
     </div>
-
-    <div class="note">For any questions and further clarifications, feel free to contact us. We look forward to our continued relationship!</div>
+    <div class="brand-bar thin"></div>
   </div>
 </body>
 </html>`;
