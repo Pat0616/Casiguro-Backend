@@ -71,6 +71,39 @@ export async function getAccounts(req, res) {
   }
 }
 
+// GET /api/accounts/:id  (account + activity summary for the account detail page)
+export async function getAccountById(req, res) {
+  try {
+    const account = await fetchAccount(pool, req.params.id);
+    if (!account) return res.status(404).json({ message: "Account not found" });
+
+    const [byCategoryRows] = await pool.query(
+      "SELECT category, COUNT(*) AS total FROM audit_logs WHERE user_id = ? GROUP BY category",
+      [account.id]
+    );
+    const [[stats]] = await pool.query(
+      `SELECT
+        MAX(created_at) AS lastActivityAt,
+        SUM(action = 'auth.login_failed' AND created_at >= NOW() - INTERVAL 30 DAY) AS failedLogins30d
+      FROM audit_logs WHERE user_id = ?`,
+      [account.id]
+    );
+
+    res.json({
+      ...account,
+      auditCount: Number(account.auditCount),
+      activitySummary: {
+        byCategory: Object.fromEntries(byCategoryRows.map((row) => [row.category, Number(row.total)])),
+        lastActivityAt: stats.lastActivityAt || null,
+        failedLogins30d: Number(stats.failedLogins30d || 0),
+      },
+    });
+  } catch (err) {
+    console.error("getAccountById error:", err);
+    res.status(500).json({ message: "Failed to fetch account" });
+  }
+}
+
 // GET /api/accounts/pending-count
 export async function getPendingCount(req, res) {
   try {

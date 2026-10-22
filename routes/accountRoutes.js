@@ -3,6 +3,7 @@ import express from "express";
 import {
   getAccounts,
   getPendingCount,
+  getAccountById,
   approveAccount,
   rejectAccount,
   deactivateAccount,
@@ -20,6 +21,7 @@ accountRouter.use(protect, requireAdmin);
 
 accountRouter.get("/", getAccounts);
 accountRouter.get("/pending-count", getPendingCount);
+accountRouter.get("/:id", getAccountById);
 accountRouter.patch("/:id/approve", approveAccount);
 accountRouter.patch("/:id/reject", rejectAccount);
 accountRouter.patch("/:id/deactivate", deactivateAccount);
