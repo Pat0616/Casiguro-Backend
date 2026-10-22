@@ -52,3 +52,10 @@ export function emitOrderUpdated(order) {
     io.emit("order:updated", order);
   }
 }
+
+// Only ids and status, no personal details: admins refresh their account list, the affected user re-checks their session
+export function emitAccountChanged({ userId, status }) {
+  if (io) {
+    io.emit("account:changed", { userId, status });
+  }
+}

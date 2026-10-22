@@ -1,6 +1,15 @@
 // backend/controllers/catalogController.js
 import pool from "../database/db.js";
 import crypto from "crypto";
+import { diffFields, logAudit } from "../utils/auditLog.js";
+
+function peso(n) {
+  return "₱" + Number(n || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function variantSummary(variants) {
+  return variants.length ? variants.map((v) => `${v.name} ${peso(v.price)}`).join(", ") : "none";
+}
 
 function parseVariants(value) {
   if (!value) return [];
@@ -153,6 +162,15 @@ export async function createCatalogItem(req, res) {
       ]
     );
 
+    await logAudit(pool, req, {
+      action: "catalog.create",
+      category: "catalog",
+      entityType: "product",
+      entityId: id,
+      entityLabel: name.trim(),
+      description: `Added ${type} "${name.trim()}" to the catalog (${peso(price)})`,
+    });
+
     const [createdRows] = await pool.query(
       `SELECT
         p.id,
@@ -247,6 +265,43 @@ export async function updateCatalogItem(req, res) {
       ]
     );
 
+    const changes = diffFields(
+      {
+        name: current.name,
+        type: current.type,
+        basePrice: Number(current.base_price),
+        options: variantSummary(parseVariants(current.variants)),
+        description: current.description,
+        image: current.image_url,
+        categoryId: current.category_id,
+        stockItem: Boolean(current.is_stock_item),
+        active: Boolean(current.is_active),
+      },
+      {
+        name: newName,
+        type: newType,
+        basePrice: newPrice,
+        options: variantSummary(validatedVariants.variants),
+        description: newDesc,
+        image: newImageUrl,
+        categoryId: newCatId,
+        stockItem: newStock,
+        active: newActive,
+      },
+      ["name", "type", "basePrice", "options", "description", "image", "categoryId", "stockItem", "active"]
+    );
+    if (changes) {
+      await logAudit(pool, req, {
+        action: "catalog.update",
+        category: "catalog",
+        entityType: "product",
+        entityId: id,
+        entityLabel: newName,
+        description: `Edited catalog item "${newName}" (${Object.keys(changes).join(", ")})`,
+        changes,
+      });
+    }
+
     const [updatedRows] = await pool.query(
       `SELECT
         p.id,
@@ -280,7 +335,7 @@ export async function toggleCatalogItemStatus(req, res) {
     const { id } = req.params;
     const { isActive } = req.body;
 
-    const [existing] = await pool.query("SELECT is_active FROM products WHERE id = ?", [id]);
+    const [existing] = await pool.query("SELECT name, is_active FROM products WHERE id = ?", [id]);
     if (existing.length === 0) {
       return res.status(404).json({ message: "Catalog item not found" });
     }
@@ -288,6 +343,15 @@ export async function toggleCatalogItemStatus(req, res) {
     const newActive = isActive !== undefined ? Boolean(isActive) : !existing[0].is_active;
 
     await pool.query("UPDATE products SET is_active = ? WHERE id = ?", [newActive, id]);
+    await logAudit(pool, req, {
+      action: "catalog.status_change",
+      category: "catalog",
+      entityType: "product",
+      entityId: id,
+      entityLabel: existing[0].name,
+      description: `Marked catalog item "${existing[0].name}" as ${newActive ? "active" : "inactive"}`,
+      changes: { active: { from: Boolean(existing[0].is_active), to: newActive } },
+    });
     res.json({ id, isActive: newActive, message: `Item marked as ${newActive ? "Active" : "Inactive"}` });
   } catch (err) {
     console.error("toggleCatalogItemStatus error:", err);
@@ -299,10 +363,19 @@ export async function toggleCatalogItemStatus(req, res) {
 export async function deleteCatalogItem(req, res) {
   try {
     const { id } = req.params;
+    const [existing] = await pool.query("SELECT name, type FROM products WHERE id = ?", [id]);
     const [result] = await pool.query("DELETE FROM products WHERE id = ?", [id]);
     if (result.affectedRows === 0) {
       return res.status(404).json({ message: "Catalog item not found" });
     }
+    await logAudit(pool, req, {
+      action: "catalog.delete",
+      category: "catalog",
+      entityType: "product",
+      entityId: id,
+      entityLabel: existing[0]?.name,
+      description: `Deleted ${existing[0]?.type || "item"} "${existing[0]?.name || id}" from the catalog`,
+    });
 
     res.json({ id, message: "Catalog item deleted" });
   } catch (err) {

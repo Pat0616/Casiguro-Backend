@@ -11,12 +11,18 @@ export async function protect(req, res, next) {
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || "default_jwt_secret_casiguro_2026");
     const [rows] = await pool.query(
-      "SELECT id, full_name, email, role FROM users WHERE id = ?",
+      "SELECT id, full_name, email, role, status FROM users WHERE id = ?",
       [decoded.id]
     );
 
     if (rows.length === 0) {
       return res.status(401).json({ message: "User account no longer exists" });
+    }
+
+    // Checked on every request, so deactivating an account signs it out immediately
+    if (rows[0].status !== "active") {
+      res.clearCookie("token");
+      return res.status(401).json({ message: "This account is no longer active. Please contact an administrator." });
     }
 
     req.user = rows[0];

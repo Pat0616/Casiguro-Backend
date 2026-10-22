@@ -3,6 +3,7 @@ import pool from "../database/db.js";
 import crypto from "crypto";
 import { emitOrderCreated, emitOrderUpdated, emitNotification } from "../websocket/socket.js";
 import { DOCUMENT_COLUMNS, DOCUMENT_LABELS, generateSoaNumber, parseDocumentFields } from "../utils/orderDocuments.js";
+import { diffFields, logAudit } from "../utils/auditLog.js";
 
 const ORDER_SELECT = `
   SELECT
@@ -369,6 +370,15 @@ export async function createOrder(req, res) {
       ]
     );
 
+    await logAudit(conn, req, {
+      action: "order.create",
+      category: "order",
+      entityType: "order",
+      entityId: orderId,
+      entityLabel: `SOA ${soaNo}`,
+      description: `Created ${isStock ? "stock" : "custom"} order SOA ${soaNo} for ${customerName.trim()}: ${productNameSnapshot} (${formatCurrency(totalPrice)})`,
+    });
+
     await conn.commit();
 
     const createdOrder = {
@@ -423,7 +433,9 @@ export async function createOrder(req, res) {
 
 // PUT /api/orders/:id (General update)
 export async function updateOrder(req, res) {
+  const conn = await pool.getConnection();
   try {
+    await conn.beginTransaction();
     const { id } = req.params;
     const {
       unitPrice: rawPrice,
@@ -434,7 +446,7 @@ export async function updateOrder(req, res) {
       paymentStatus,
     } = req.body;
 
-    const [existingRows] = await pool.query(
+    const [existingRows] = await conn.query(
       `SELECT
         o.*,
         COALESCE(c.full_name, '') AS customerName,
@@ -443,11 +455,13 @@ export async function updateOrder(req, res) {
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
       LEFT JOIN categories cat ON o.category_id = cat.id
-      WHERE o.id = ?`,
+      WHERE o.id = ?
+      FOR UPDATE`,
       [id]
     );
 
     if (existingRows.length === 0) {
+      await conn.rollback();
       return res.status(404).json({ message: "Order not found" });
     }
 
@@ -466,9 +480,8 @@ export async function updateOrder(req, res) {
     const overallProgress = quantity > 0 ? Math.min(100, Math.round((quantityCompleted / quantity) * 100)) : 0;
 
     const userId = req.user?.id || null;
-    const userName = req.user?.full_name || "Staff";
 
-    await pool.query(
+    await conn.query(
       `UPDATE orders SET
         unit_price = ?,
         total_price = ?,
@@ -498,6 +511,46 @@ export async function updateOrder(req, res) {
       ]
     );
 
+    // Payment fields and order fields are logged as separate entries so each shows under its own audit category
+    const before = {
+      amountPaid: Number(current.amount_paid),
+      balance: Number(current.balance),
+      paymentStatus: current.payment_status,
+      unitPrice: Number(current.unit_price),
+      totalPrice: Number(current.total_price),
+      quantity: Number(current.quantity),
+      quantityCompleted: Number(current.quantity_completed),
+      status: current.status,
+    };
+    const after = { amountPaid, balance, paymentStatus: newPaymentStatus, unitPrice, totalPrice, quantity, quantityCompleted, status: newStatus };
+    const label = `SOA ${current.soa_no}`;
+    const paymentChanges = diffFields(before, after, ["amountPaid", "balance", "paymentStatus"]);
+    const orderChanges = diffFields(before, after, ["unitPrice", "totalPrice", "quantity", "quantityCompleted", "status"]);
+    if (paymentChanges) {
+      await logAudit(conn, req, {
+        action: "payment.update",
+        category: "payment",
+        entityType: "order",
+        entityId: id,
+        entityLabel: label,
+        description: `Updated payment on ${label}: amount paid ${formatCurrency(before.amountPaid)} → ${formatCurrency(amountPaid)}`,
+        changes: paymentChanges,
+      });
+    }
+    if (orderChanges) {
+      await logAudit(conn, req, {
+        action: "order.update",
+        category: "order",
+        entityType: "order",
+        entityId: id,
+        entityLabel: label,
+        description: `Updated ${label}${orderChanges.status ? `: status ${STATUS_LABELS[before.status] || before.status} → ${STATUS_LABELS[newStatus] || newStatus}` : ""}`,
+        changes: orderChanges,
+      });
+    }
+
+    await conn.commit();
+
     const [updatedOrderRows] = await pool.query(`${ORDER_SELECT} WHERE o.id = ?`, [id]);
 
     const [fullOrder] = await attachItemsToOrders(updatedOrderRows);
@@ -505,8 +558,11 @@ export async function updateOrder(req, res) {
 
     res.json(fullOrder);
   } catch (err) {
+    await conn.rollback();
     console.error("updateOrder error:", err);
     res.status(500).json({ message: "Failed to update order" });
+  } finally {
+    conn.release();
   }
 }
 
@@ -562,6 +618,18 @@ export async function updateOrderDocuments(req, res) {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'detail_update', ?, ?)`,
         [notifId, userId, userName, id, order.soa_no, order.customer_id, order.customerName, detail, now]
       );
+
+      await logAudit(conn, req, {
+        action: "order.documents_update",
+        category: "order",
+        entityType: "order",
+        entityId: id,
+        entityLabel: `SOA ${order.soa_no}`,
+        description: detail,
+        changes: Object.fromEntries(
+          changedKeys.map((key) => [DOCUMENT_LABELS[key], { from: order[DOCUMENT_COLUMNS[key]] ?? null, to: fields[key] }])
+        ),
+      });
 
       createdNotif = {
         id: notifId,
@@ -629,11 +697,17 @@ export async function updateItemProduction(req, res) {
       updatesToApply.push({ id: itemId, quantityCompleted: Number(singleQtyCompleted) || 0 });
     }
 
+    const itemChanges = {};
     for (const update of updatesToApply) {
       const match = existingItems.find((it) => it.id === update.id);
       if (match) {
         const qtyReq = Number(match.quantity);
         const qtyComp = Math.max(0, Math.min(qtyReq, update.quantityCompleted));
+        const prevComp = Number(match.quantity_completed);
+        if (prevComp !== qtyComp) {
+          const itemLabel = match.variant_snapshot ? `${match.item_name_snapshot} (${match.variant_snapshot})` : match.item_name_snapshot;
+          itemChanges[`${itemLabel} completed`] = { from: `${prevComp}/${qtyReq}`, to: `${qtyComp}/${qtyReq}` };
+        }
         const itemProgress = qtyReq > 0 ? Math.min(100, Math.round((qtyComp / qtyReq) * 100)) : 0;
         let itemStatus = "pending";
         if (itemProgress >= 100) itemStatus = "completed";
@@ -696,6 +770,23 @@ export async function updateItemProduction(req, res) {
         id,
       ]
     );
+
+    if (order.status !== derivedStatus) {
+      itemChanges.status = { from: order.status, to: derivedStatus };
+    }
+    if (Object.keys(itemChanges).length > 0) {
+      await logAudit(conn, req, {
+        action: "order.production_update",
+        category: "order",
+        entityType: "order",
+        entityId: id,
+        entityLabel: `SOA ${order.soa_no}`,
+        description: `Updated production on SOA ${order.soa_no}: ${totalOrderCompleted}/${totalOrderQty} pcs (${overallProgress}%)${
+          order.status !== derivedStatus ? `, status ${STATUS_LABELS[order.status] || order.status} → ${STATUS_LABELS[derivedStatus] || derivedStatus}` : ""
+        }`,
+        changes: itemChanges,
+      });
+    }
 
     // Create persistent notification if status changed or 100% completed
     if (order.status !== derivedStatus) {
@@ -795,6 +886,20 @@ export async function recordPayment(req, res) {
       ) VALUES (?, ?, ?, ?, ?, ?, (SELECT full_name FROM customers WHERE id = ?), 'detail_update', ?, NOW())`,
       [notifId, userId, userName, id, order.soa_no, order.customer_id, order.customer_id, notifDetail]
     );
+
+    await logAudit(conn, req, {
+      action: "payment.record",
+      category: "payment",
+      entityType: "order",
+      entityId: id,
+      entityLabel: `SOA ${order.soa_no}`,
+      description: notifDetail,
+      changes: diffFields(
+        { amountPaid: currentPaid, balance: Number(order.balance), paymentStatus: order.payment_status },
+        { amountPaid: newPaid, balance: newBalance, paymentStatus: newPaymentStatus },
+        ["amountPaid", "balance", "paymentStatus"]
+      ),
+    });
 
     await conn.commit();
 

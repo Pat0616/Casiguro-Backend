@@ -5,6 +5,11 @@ import { emitNotification, emitOrderCreated } from "../websocket/socket.js";
 import { generateSoaNumber } from "../utils/orderDocuments.js";
 import { renderPdf } from "../utils/pdfRenderer.js";
 import { renderQuotationHtml } from "../templates/quotationTemplate.js";
+import { diffFields, logAudit } from "../utils/auditLog.js";
+
+function peso(n) {
+  return "₱" + Number(n || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
 
 // Helper to auto-mark expired quotations
 async function markExpiredQuotations() {
@@ -407,6 +412,15 @@ export async function createQuotation(req, res) {
       );
     }
 
+    await logAudit(conn, req, {
+      action: "quotation.create",
+      category: "quotation",
+      entityType: "quotation",
+      entityId: quoteId,
+      entityLabel: quoteNo,
+      description: `Created quotation ${quoteNo} for ${customerName.trim()} (${preparedItems.length} item${preparedItems.length === 1 ? "" : "s"}, ${peso(totalAmount)}) as ${quoteStatus}`,
+    });
+
     await conn.commit();
 
     const createdQuotation = {
@@ -559,6 +573,10 @@ export async function updateQuotation(req, res) {
     );
 
     // 3. Delete old items and insert new
+    const [[{ previousItemCount }]] = await conn.query(
+      "SELECT COUNT(*) AS previousItemCount FROM quotation_items WHERE quotation_id = ?",
+      [id]
+    );
     await conn.query("DELETE FROM quotation_items WHERE quotation_id = ?", [id]);
 
     for (const item of preparedItems) {
@@ -587,6 +605,34 @@ export async function updateQuotation(req, res) {
       );
     }
 
+    await logAudit(conn, req, {
+      action: "quotation.update",
+      category: "quotation",
+      entityType: "quotation",
+      entityId: id,
+      entityLabel: current.quote_no,
+      description: `Edited quotation ${current.quote_no} (${preparedItems.length} item${preparedItems.length === 1 ? "" : "s"}, ${peso(totalAmount)})`,
+      changes: diffFields(
+        {
+          customerName: current.customer_name,
+          contactNumber: current.contact_number,
+          validUntil: current.valid_until,
+          totalAmount: Number(current.total_amount),
+          status: current.status,
+          itemCount: previousItemCount,
+        },
+        {
+          customerName: customerName.trim(),
+          contactNumber: contactNumber ? contactNumber.trim() : null,
+          validUntil,
+          totalAmount,
+          status: newStatus,
+          itemCount: preparedItems.length,
+        },
+        ["customerName", "contactNumber", "validUntil", "totalAmount", "status", "itemCount"]
+      ),
+    });
+
     await conn.commit();
 
     res.json({
@@ -611,36 +657,57 @@ export async function updateQuotation(req, res) {
 
 // PATCH /api/quotations/:id/status
 export async function updateQuotationStatus(req, res) {
+  const conn = await pool.getConnection();
   try {
+    await conn.beginTransaction();
     const { id } = req.params;
     const { status, rejectionReason } = req.body;
 
     if (!["draft", "sent", "rejected", "expired"].includes(status)) {
+      await conn.rollback();
       return res.status(400).json({ message: "Invalid status transition" });
     }
 
-    const [existing] = await pool.query("SELECT * FROM quotations WHERE id = ?", [id]);
+    const [existing] = await conn.query("SELECT * FROM quotations WHERE id = ? FOR UPDATE", [id]);
     if (existing.length === 0) {
+      await conn.rollback();
       return res.status(404).json({ message: "Quotation not found" });
     }
 
     if (existing[0].status === "accepted") {
+      await conn.rollback();
       return res.status(400).json({ message: "Accepted quotations cannot change status" });
     }
 
-    await pool.query(
+    const reason = status === "rejected" ? rejectionReason || null : null;
+    await conn.query(
       `UPDATE quotations SET
         status = ?,
         rejection_reason = ?,
         updated_by = ?
       WHERE id = ?`,
-      [status, status === "rejected" ? rejectionReason || null : null, req.user?.id || null, id]
+      [status, reason, req.user?.id || null, id]
     );
 
+    const quote = existing[0];
+    await logAudit(conn, req, {
+      action: "quotation.status_change",
+      category: "quotation",
+      entityType: "quotation",
+      entityId: id,
+      entityLabel: quote.quote_no,
+      description: `Marked quotation ${quote.quote_no} (${quote.customer_name}) as ${status}${reason ? `: ${reason}` : ""}`,
+      changes: { status: { from: quote.status, to: status } },
+    });
+
+    await conn.commit();
     res.json({ id, status, message: `Quotation marked as ${status}` });
   } catch (err) {
+    await conn.rollback();
     console.error("updateQuotationStatus error:", err);
     res.status(500).json({ message: "Failed to update status" });
+  } finally {
+    conn.release();
   }
 }
 
@@ -800,6 +867,25 @@ export async function acceptAndConvertToOrder(req, res) {
         now,
       ]
     );
+
+    // Two entries so the action shows under both the Quotations and Orders filters of the audit log
+    await logAudit(conn, req, {
+      action: "quotation.accept",
+      category: "quotation",
+      entityType: "quotation",
+      entityId: quote.id,
+      entityLabel: quote.quote_no,
+      description: `Accepted quotation ${quote.quote_no} (${quote.customer_name}) and converted it to order SOA ${soaNo}`,
+      changes: { status: { from: quote.status, to: "accepted" } },
+    });
+    await logAudit(conn, req, {
+      action: "order.create",
+      category: "order",
+      entityType: "order",
+      entityId: orderId,
+      entityLabel: `SOA ${soaNo}`,
+      description: `Created order SOA ${soaNo} for ${quote.customer_name} from quotation ${quote.quote_no} (${peso(totalAmount)})`,
+    });
 
     await conn.commit();
 

@@ -9,7 +9,8 @@
     "migrate:catalog-variants": "node scripts/migrate_catalog_variants.js",
     "migrate:soa-numbers": "node scripts/migrate_soa_numbers.js",
     "migrate:notification-reads": "node scripts/migrate_notification_reads.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "migrate:accounts-audit": "node scripts/migrate_accounts_audit.js"
   },
   "author": "",
   "license": "ISC",

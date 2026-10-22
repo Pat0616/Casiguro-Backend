@@ -18,12 +18,21 @@ CREATE TABLE IF NOT EXISTS users (
   id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
   full_name VARCHAR(150) NOT NULL,
   email VARCHAR(150) UNIQUE NOT NULL,
+  contact_number VARCHAR(50) NULL,
   password VARCHAR(255) NOT NULL,
   role VARCHAR(50) NOT NULL DEFAULT 'employee',
+  status VARCHAR(20) NOT NULL DEFAULT 'pending',   -- self-registered accounts wait for admin approval
+  approved_by CHAR(36) NULL,
+  approved_at TIMESTAMP NULL,
+  status_changed_by CHAR(36) NULL,
+  status_changed_at TIMESTAMP NULL,
+  status_reason TEXT NULL,                          -- rejection / deactivation reason
+  last_login_at TIMESTAMP NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
-  CONSTRAINT chk_users_role CHECK (role IN ('admin', 'employee'))
+  CONSTRAINT chk_users_role CHECK (role IN ('admin', 'employee')),
+  CONSTRAINT chk_users_status CHECK (status IN ('pending', 'active', 'rejected', 'deactivated'))
 ) ENGINE=InnoDB;
 
 -- ========================================================
@@ -440,3 +449,32 @@ CREATE TABLE IF NOT EXISTS payments (
 
   INDEX idx_payments_order_id (order_id)
 ) ENGINE=InnoDB;
+
+-- ========================================================
+-- 12. AUDIT LOGS (Per-account activity trail; append-only)
+--     Each entry belongs to the account that performed the action.
+-- ========================================================
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id CHAR(36) NULL,               -- NULL only for failed sign-ins with an unknown email
+  user_name VARCHAR(150) NULL,         -- name/role as they were at the time of the action
+  user_role VARCHAR(20) NULL,
+  action VARCHAR(60) NOT NULL,         -- e.g. auth.login, order.update, account.approve
+  category VARCHAR(30) NOT NULL,       -- auth | account | order | payment | quotation | catalog
+  entity_type VARCHAR(40) NULL,
+  entity_id VARCHAR(64) NULL,
+  entity_label VARCHAR(150) NULL,      -- e.g. "SOA 2026-10-3", "QTN-2026-0031"
+  description TEXT NOT NULL,
+  changes JSON NULL,                   -- { field: { from, to } }
+  ip_address VARCHAR(64) NULL,
+  user_agent VARCHAR(255) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  INDEX idx_audit_logs_user_time (user_id, created_at),
+  INDEX idx_audit_logs_category (category)
+) ENGINE=InnoDB;
+
+CREATE TRIGGER trg_audit_logs_no_update BEFORE UPDATE ON audit_logs FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'audit_logs is append-only';
+CREATE TRIGGER trg_audit_logs_no_delete BEFORE DELETE ON audit_logs FOR EACH ROW
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'audit_logs is append-only';
