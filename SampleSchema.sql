@@ -323,7 +323,6 @@ CREATE TABLE IF NOT EXISTS notifications (
   message TEXT NOT NULL,
 
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  read_at TIMESTAMP NULL,
 
   CONSTRAINT chk_notifications_type
     CHECK (
@@ -353,8 +352,32 @@ CREATE TABLE IF NOT EXISTS notifications (
     ON DELETE SET NULL
     ON UPDATE CASCADE,
 
-  INDEX idx_notifications_created_at (created_at DESC),
-  INDEX idx_notifications_read_at (read_at)
+  INDEX idx_notifications_created_at (created_at DESC)
+) ENGINE=InnoDB;
+
+-- ========================================================
+-- 9b. NOTIFICATION READS (Per-user read state: a row means that user has read it)
+-- ========================================================
+CREATE TABLE IF NOT EXISTS notification_reads (
+  notification_id CHAR(36) NOT NULL,
+  user_id CHAR(36) NOT NULL,
+  read_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  PRIMARY KEY (notification_id, user_id),
+
+  CONSTRAINT fk_notification_reads_notification
+    FOREIGN KEY (notification_id)
+    REFERENCES notifications(id)
+    ON DELETE CASCADE
+    ON UPDATE CASCADE,
+
+  CONSTRAINT fk_notification_reads_user
+    FOREIGN KEY (user_id)
+    REFERENCES users(id)
+    ON DELETE CASCADE
+    ON UPDATE CASCADE,
+
+  INDEX idx_notification_reads_user_id (user_id)
 ) ENGINE=InnoDB;
 
 -- ========================================================
