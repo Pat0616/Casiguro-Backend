@@ -5,26 +5,37 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 export const COMPANY = {
-  name: "Casiguro",
-  suffix: "ENTERPRISES INC,",
+  name: "CASIGURO ENTERPRISES, INC.",
   address: "#6 & 7 Marem Building, Corner Jb Alegre Street & Habana Street, Casiguran, Sorsogon",
   contact: "Contact Nos.: 09688817969/09203757810   E-mail add: casiguro.printingservices@gmail.com",
 };
 
 const MIN_ITEM_ROWS = 8;
-const ASSETS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "assets");
-const LOGO_TYPES = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".svg": "image/svg+xml" };
 
-// Drop a file named casiguro-logo.(png|jpg|jpeg|svg) into templates/assets to replace the text placeholder.
-// Read on every render so a new logo shows up without restarting the server.
+// The brand logo (swoosh + "CASIGURO ENTERPRISES, INC." title) shared with the frontend.
+// Both repos sit side by side, so the backend reads it straight from the frontend's public folder.
+const LOGO_FILE = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../casiguro-app/public/CasiguroEnterpriseLogo.png"
+);
+
+// Where the artwork sits inside the 500x500 PNG (the rest is transparent padding), used to crop it
+const LOGO_CROP = { imageSize: 500, x: 41, y: 161, width: 418, height: 178 };
+
+// Read on every render so a replaced logo file shows up without restarting the server
 function loadLogoDataUri() {
-  for (const [ext, mime] of Object.entries(LOGO_TYPES)) {
-    const file = path.join(ASSETS_DIR, `casiguro-logo${ext}`);
-    if (fs.existsSync(file)) {
-      return `data:${mime};base64,${fs.readFileSync(file).toString("base64")}`;
-    }
-  }
-  return null;
+  if (!fs.existsSync(LOGO_FILE)) return null;
+  return `data:image/png;base64,${fs.readFileSync(LOGO_FILE).toString("base64")}`;
+}
+
+// CSS that crops the padded square PNG to just its artwork. The image is absolutely positioned so it can't
+// stretch the box past the artwork's aspect ratio; percentages keep it sharp at any width.
+function logoCropCss() {
+  const { imageSize, x, y, width, height } = LOGO_CROP;
+  const pct = (n, of) => `${((n / of) * 100).toFixed(3)}%`;
+  return `
+  .logo { position: relative; width: 250px; aspect-ratio: ${width} / ${height}; overflow: hidden; flex-shrink: 0; }
+  .logo img { position: absolute; width: ${pct(imageSize, width)}; left: -${pct(x, width)}; top: -${pct(y, height)}; }`;
 }
 
 function escapeHtml(value) {
@@ -96,13 +107,10 @@ export function renderQuotationHtml({ quotation, items, order }) {
   body { margin: 0; font-family: Calibri, Arial, sans-serif; font-size: 10.5pt; color: #000; }
   .sheet { border: 1.5px solid #000; padding: 0 0 6px; }
 
-  .letterhead { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 12px 16px 4px; }
-  .logo-slot { width: 220px; height: 64px; display: flex; align-items: center; justify-content: center; }
-  .logo-slot img { max-width: 100%; max-height: 100%; object-fit: contain; }
-  .logo-placeholder { font-family: "Brush Script MT", "Segoe Script", cursive; font-style: italic; font-weight: 700;
-    font-size: 34pt; color: #1f4e9c; letter-spacing: .5px; }
-  .company-suffix { font-family: "Courier New", monospace; font-size: 19pt; color: #2b4f9e; }
-  .company-lines { font-size: 7.5pt; text-align: center; line-height: 1.5; margin-top: -2px; }
+  .letterhead { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 12px 16px 2px; text-align: center; }
+  ${logoCropCss()}
+  .logo-fallback { font-family: Arial, sans-serif; font-weight: 700; font-size: 18pt; color: #1aa3e8; }
+  .company-lines { font-size: 8pt; line-height: 1.6; }
   h1 { font-family: "Arial Black", Arial, sans-serif; font-size: 18pt; text-align: center; margin: 8px 0 6px; letter-spacing: .3px; }
 
   .info { width: 100%; border-collapse: collapse; border-top: 1.5px solid #000; }
@@ -133,13 +141,10 @@ export function renderQuotationHtml({ quotation, items, order }) {
 <body>
   <div class="sheet">
     <div class="letterhead">
-      <div class="logo-slot">
-        ${logo ? `<img src="${logo}" alt="Casiguro">` : `<span class="logo-placeholder">${escapeHtml(COMPANY.name)}</span>`}
-      </div>
-      <div>
-        <div class="company-suffix">${escapeHtml(COMPANY.suffix)}</div>
-        <div class="company-lines">${escapeHtml(COMPANY.address)}<br>${escapeHtml(COMPANY.contact)}</div>
-      </div>
+      ${logo
+        ? `<div class="logo"><img src="${logo}" alt="${escapeHtml(COMPANY.name)}"></div>`
+        : `<div class="logo-fallback">${escapeHtml(COMPANY.name)}</div>`}
+      <div class="company-lines">${escapeHtml(COMPANY.address)}<br>${escapeHtml(COMPANY.contact)}</div>
     </div>
     <h1>PRICE QUOTATION</h1>
 
