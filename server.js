@@ -11,6 +11,7 @@ import customerRouter from "./routes/customerRoutes.js";
 import catalogRouter from "./routes/catalogRoutes.js";
 import quotationRouter from "./routes/quotationRoutes.js";
 import accountRouter from "./routes/accountRoutes.js";
+import reportRouter from "./routes/reportRoutes.js";
 import { initSocket } from "./websocket/socket.js";
 
 dotenv.config();
@@ -39,6 +40,7 @@ app.use("/api/orders", orderRouter);
 app.use("/api/notifications", notificationRouter);
 app.use("/api/customers", customerRouter);
 app.use("/api/accounts", accountRouter);
+app.use("/api/reports", reportRouter);
 
 app.get("/", (req, res) => {
   res.send("CASIGURO Enterprises API is running...");
