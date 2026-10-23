@@ -6,6 +6,7 @@ import pool from "../database/db.js"; // import your pool directly
 import { generateToken } from "../utils/generateToken.js";
 import { logAudit, logAuditSafely } from "../utils/auditLog.js";
 import { emitAccountChanged } from "../websocket/socket.js";
+import { sendVerificationCode } from "../utils/mailer.js";
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const CONTACT_PATTERN = /^\+?[\d\s()-]{7,20}$/;
@@ -16,42 +17,212 @@ const BLOCKED_LOGIN_MESSAGES = {
   deactivated: "This account has been deactivated. Please contact an administrator.",
 };
 
-// REGISTER — public sign-up. Always creates a pending employee; an admin must approve it before it can sign in.
-export async function register(req, res) {
+// ---------------------------------------------------------------------------------------------------------------
+// REGISTRATION — public sign-up in two steps. /register/start emails a 6-digit code; /register/verify checks it and
+// only then creates the pending employee, so every request an admin sees has a confirmed email address.
+// ---------------------------------------------------------------------------------------------------------------
+const CODE_TTL_MINUTES = 10;
+const RESEND_COOLDOWN_SECONDS = 60;
+const MAX_CODE_ATTEMPTS = 5;
+const MAX_CODES_PER_HOUR = 5;
+
+function parseRegistration(body = {}) {
+  const full_name = String(body.full_name || "").trim();
+  const email = String(body.email || "").trim().toLowerCase();
+  const contact_number = String(body.contact_number || "").trim();
+  const password = String(body.password || "");
+
+  if (full_name.length < 2 || full_name.length > 150) return { error: "Enter your full name." };
+  if (!EMAIL_PATTERN.test(email) || email.length > 150) return { error: "Enter a valid email address." };
+  if (!CONTACT_PATTERN.test(contact_number)) return { error: "Enter a valid contact number." };
+  if (password.length < 8 || !/[A-Za-z]/.test(password) || !/\d/.test(password)) {
+    return { error: "Password must be at least 8 characters and include a letter and a number." };
+  }
+  return { fields: { full_name, email, contact_number, password } };
+}
+
+// "2026-10-22 23:15:00" → "10/22/2026"
+const toDocDate = (value) => {
+  const [y, m, d] = String(value || "").slice(0, 10).split("-");
+  return y ? `${m}/${d}/${y}` : "";
+};
+
+// Why an email can't start a new request, based on the account that already uses it
+function existingAccountMessage(user) {
+  switch (user.status) {
+    case "rejected":
+      return `This email's registration was not approved${user.status_changed_at ? ` on ${toDocDate(user.status_changed_at)}` : ""}. Please contact an administrator.`;
+    case "pending":
+      return "A request with this email is already waiting for admin approval.";
+    case "deactivated":
+      return "This account has been deactivated. Please contact an administrator.";
+    default:
+      return "This email already has an account. Please sign in.";
+  }
+}
+
+const hashCode = (email, code) =>
+  crypto.createHash("sha256").update(`${email}:${code}:${process.env.JWT_SECRET || ""}`).digest("hex");
+
+const newCode = () => String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
+
+async function findVerification(db, email) {
+  const [rows] = await db.query(
+    `SELECT *,
+      expires_at < NOW() AS expired,
+      TIMESTAMPDIFF(SECOND, last_sent_at, NOW()) AS seconds_since_sent,
+      window_started_at < NOW() - INTERVAL 1 HOUR AS window_over
+    FROM email_verifications WHERE email = ?`,
+    [email]
+  );
+  return rows[0] || null;
+}
+
+// Rate limits shared by start (re-submitting the form) and resend. Returns an error message or null.
+function sendLimitError(row) {
+  if (!row) return null;
+  if (row.seconds_since_sent < RESEND_COOLDOWN_SECONDS) {
+    return `Please wait ${RESEND_COOLDOWN_SECONDS - row.seconds_since_sent} seconds before requesting another code.`;
+  }
+  if (!row.window_over && row.send_count >= MAX_CODES_PER_HOUR) {
+    return "Too many codes requested for this email. Please try again in an hour.";
+  }
+  return null;
+}
+
+async function emailCode(res, email, fullName, code) {
+  try {
+    await sendVerificationCode(email, fullName, code, CODE_TTL_MINUTES);
+    return true;
+  } catch (err) {
+    console.error("Verification email failed:", err);
+    res.status(502).json({ message: "We couldn't send the verification email. Check the address and try again." });
+    return false;
+  }
+}
+
+// POST /api/auth/register/start — validate, refuse emails already in use, email a code. No account is created yet.
+export async function startRegistration(req, res) {
+  try {
+    const { fields, error } = parseRegistration(req.body);
+    if (error) return res.status(400).json({ message: error });
+    const { full_name, email, contact_number, password } = fields;
+
+    const [users] = await pool.query("SELECT status, status_changed_at FROM users WHERE LOWER(email) = ?", [email]);
+    if (users.length > 0) return res.status(409).json({ message: existingAccountMessage(users[0]) });
+
+    const existing = await findVerification(pool, email);
+    const limitError = sendLimitError(existing);
+    if (limitError) return res.status(429).json({ message: limitError });
+
+    const code = newCode();
+    if (!(await emailCode(res, email, full_name, code))) return;
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const sameWindow = existing && !existing.window_over;
+    await pool.query(
+      `INSERT INTO email_verifications
+        (email, code_hash, full_name, contact_number, password_hash, expires_at, attempts, send_count, window_started_at, last_sent_at)
+      VALUES (?, ?, ?, ?, ?, NOW() + INTERVAL ? MINUTE, 0, ?, ${sameWindow ? "?" : "NOW()"}, NOW())
+      ON DUPLICATE KEY UPDATE
+        code_hash = VALUES(code_hash), full_name = VALUES(full_name), contact_number = VALUES(contact_number),
+        password_hash = VALUES(password_hash), expires_at = VALUES(expires_at), attempts = 0,
+        send_count = VALUES(send_count), window_started_at = VALUES(window_started_at), last_sent_at = NOW()`,
+      [
+        email, hashCode(email, code), full_name, contact_number, passwordHash, CODE_TTL_MINUTES,
+        sameWindow ? existing.send_count + 1 : 1,
+        ...(sameWindow ? [existing.window_started_at] : []),
+      ]
+    );
+    // Housekeeping: abandoned sign-ups
+    await pool.query("DELETE FROM email_verifications WHERE expires_at < NOW() - INTERVAL 1 DAY");
+
+    res.status(202).json({
+      message: `We sent a 6-digit code to ${email}.`,
+      email,
+      expiresInMinutes: CODE_TTL_MINUTES,
+      resendAfterSeconds: RESEND_COOLDOWN_SECONDS,
+    });
+  } catch (err) {
+    console.error("startRegistration error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+}
+
+// POST /api/auth/register/resend — new code for a sign-up that was already started
+export async function resendRegistrationCode(req, res) {
+  try {
+    const email = String(req.body.email || "").trim().toLowerCase();
+    const existing = await findVerification(pool, email);
+    if (!existing) return res.status(404).json({ message: "No sign-up in progress for this email. Please fill in the form again." });
+    const limitError = sendLimitError(existing);
+    if (limitError) return res.status(429).json({ message: limitError });
+
+    const code = newCode();
+    if (!(await emailCode(res, email, existing.full_name, code))) return;
+
+    const sameWindow = !existing.window_over;
+    await pool.query(
+      `UPDATE email_verifications SET
+        code_hash = ?, expires_at = NOW() + INTERVAL ? MINUTE, attempts = 0, last_sent_at = NOW(),
+        send_count = ?, window_started_at = ${sameWindow ? "window_started_at" : "NOW()"}
+      WHERE email = ?`,
+      [hashCode(email, code), CODE_TTL_MINUTES, sameWindow ? existing.send_count + 1 : 1, email]
+    );
+    res.json({ message: `We sent a new code to ${email}.`, expiresInMinutes: CODE_TTL_MINUTES, resendAfterSeconds: RESEND_COOLDOWN_SECONDS });
+  } catch (err) {
+    console.error("resendRegistrationCode error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+}
+
+// POST /api/auth/register/verify — check the code, then create the pending employee for admin approval
+export async function verifyRegistration(req, res) {
   const conn = await pool.getConnection();
   try {
-    const full_name = String(req.body.full_name || "").trim();
     const email = String(req.body.email || "").trim().toLowerCase();
-    const contact_number = String(req.body.contact_number || "").trim();
-    const password = String(req.body.password || "");
-
-    if (full_name.length < 2 || full_name.length > 150) {
-      return res.status(400).json({ message: "Enter your full name." });
-    }
-    if (!EMAIL_PATTERN.test(email) || email.length > 150) {
-      return res.status(400).json({ message: "Enter a valid email address." });
-    }
-    if (!CONTACT_PATTERN.test(contact_number)) {
-      return res.status(400).json({ message: "Enter a valid contact number." });
-    }
-    if (password.length < 8 || !/[A-Za-z]/.test(password) || !/\d/.test(password)) {
-      return res.status(400).json({ message: "Password must be at least 8 characters and include a letter and a number." });
-    }
+    const code = String(req.body.code || "").trim();
+    if (!/^\d{6}$/.test(code)) return res.status(400).json({ message: "Enter the 6-digit code from the email." });
 
     await conn.beginTransaction();
-    const [existingRows] = await conn.query("SELECT id FROM users WHERE LOWER(email) = ?", [email]);
-    if (existingRows.length > 0) {
+    const [lockRows] = await conn.query("SELECT email FROM email_verifications WHERE email = ? FOR UPDATE", [email]);
+    const pending = lockRows.length > 0 ? await findVerification(conn, email) : null;
+    if (!pending) {
       await conn.rollback();
-      return res.status(409).json({ message: "An account with this email already exists." });
+      return res.status(404).json({ message: "No sign-up in progress for this email. Please fill in the form again." });
+    }
+    if (pending.expired || pending.attempts >= MAX_CODE_ATTEMPTS) {
+      await conn.rollback();
+      return res.status(410).json({ message: "This code has expired. Please request a new one." });
+    }
+
+    const expected = Buffer.from(pending.code_hash, "hex");
+    const given = Buffer.from(hashCode(email, code), "hex");
+    if (!crypto.timingSafeEqual(expected, given)) {
+      await conn.query("UPDATE email_verifications SET attempts = attempts + 1 WHERE email = ?", [email]);
+      await conn.commit();
+      const left = MAX_CODE_ATTEMPTS - pending.attempts - 1;
+      return res.status(400).json({
+        message: left > 0 ? `Incorrect code. ${left} ${left === 1 ? "try" : "tries"} left.` : "Incorrect code. Please request a new one.",
+      });
+    }
+
+    // The email may have been registered by someone else while this code was outstanding
+    const [users] = await conn.query("SELECT status, status_changed_at FROM users WHERE LOWER(email) = ?", [email]);
+    if (users.length > 0) {
+      await conn.query("DELETE FROM email_verifications WHERE email = ?", [email]);
+      await conn.commit();
+      return res.status(409).json({ message: existingAccountMessage(users[0]) });
     }
 
     const id = crypto.randomUUID();
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const { full_name, contact_number, password_hash: hashedPassword } = pending;
     // role and status are fixed server-side; anything the client sends for them is ignored
     await conn.query(
       "INSERT INTO users (id, full_name, email, contact_number, password, role, status) VALUES (?, ?, ?, ?, ?, 'employee', 'pending')",
       [id, full_name, email, contact_number, hashedPassword]
     );
+    await conn.query("DELETE FROM email_verifications WHERE email = ?", [email]);
     await logAudit(conn, req, {
       actor: { id, full_name, role: "employee" },
       action: "account.register",
@@ -59,7 +230,7 @@ export async function register(req, res) {
       entityType: "user",
       entityId: id,
       entityLabel: email,
-      description: `Registered an account (${email}); awaiting admin approval`,
+      description: `Registered an account (${email}, email verified); awaiting admin approval`,
     });
     await conn.commit();
 
@@ -70,7 +241,7 @@ export async function register(req, res) {
     });
   } catch (err) {
     await conn.rollback();
-    console.error("Register error:", err);
+    console.error("verifyRegistration error:", err);
     res.status(500).json({ message: "Server error" });
   } finally {
     conn.release();

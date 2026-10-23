@@ -35,6 +35,21 @@ CREATE TABLE IF NOT EXISTS users (
   CONSTRAINT chk_users_status CHECK (status IN ('pending', 'active', 'rejected', 'deactivated'))
 ) ENGINE=InnoDB;
 
+-- Self-registration waiting for its emailed code. The user row is created only after the code is entered.
+CREATE TABLE IF NOT EXISTS email_verifications (
+  email VARCHAR(150) PRIMARY KEY,                   -- lowercased
+  code_hash CHAR(64) NOT NULL,                      -- SHA-256 of code + JWT_SECRET; the code itself is never stored
+  full_name VARCHAR(150) NOT NULL,
+  contact_number VARCHAR(50) NOT NULL,
+  password_hash VARCHAR(255) NOT NULL,              -- bcrypt, same as users.password
+  expires_at DATETIME NOT NULL,
+  attempts INT NOT NULL DEFAULT 0,                  -- wrong codes entered for the current code
+  send_count INT NOT NULL DEFAULT 1,                -- codes sent in the current hour window
+  window_started_at DATETIME NOT NULL,
+  last_sent_at DATETIME NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
 -- ========================================================
 -- 2. CUSTOMERS (Directory, contact info, and balance history)
 -- ========================================================
