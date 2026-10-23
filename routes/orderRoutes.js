@@ -7,9 +7,12 @@ import {
   updateOrder,
   updateOrderDocuments,
   updateItemProduction,
+  getOrderPayments,
   recordPayment,
+  voidPayment,
+  cancelOrder,
 } from "../controllers/orderController.js";
-import { protect } from "../middleware/authMiddleWare.js";
+import { protect, requireAdmin } from "../middleware/authMiddleWare.js";
 
 const orderRouter = express.Router();
 
@@ -21,6 +24,9 @@ orderRouter.post("/", createOrder);
 orderRouter.put("/:id", updateOrder);
 orderRouter.put("/:id/documents", updateOrderDocuments);
 orderRouter.put("/:id/production", updateItemProduction);
-orderRouter.post("/:id/payment", recordPayment);
+orderRouter.get("/:id/payments", getOrderPayments);
+orderRouter.post("/:id/payments", recordPayment);
+orderRouter.patch("/:id/payments/:paymentId/void", requireAdmin, voidPayment);
+orderRouter.post("/:id/cancel", requireAdmin, cancelOrder);
 
 export default orderRouter;

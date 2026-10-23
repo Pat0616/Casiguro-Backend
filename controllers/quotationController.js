@@ -6,6 +6,8 @@ import { generateSoaNumber } from "../utils/orderDocuments.js";
 import { renderPdf } from "../utils/pdfRenderer.js";
 import { renderQuotationHtml } from "../templates/quotationTemplate.js";
 import { diffFields, logAudit } from "../utils/auditLog.js";
+import { describePayment, insertPayment, parsePaymentInput, recalcOrderPayments } from "../utils/payments.js";
+import { loadFullOrder } from "./orderController.js";
 
 function peso(n) {
   return "₱" + Number(n || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -718,7 +720,7 @@ export async function acceptAndConvertToOrder(req, res) {
   try {
     await conn.beginTransaction();
     const { id } = req.params;
-    const { dueDate: rawDueDate, notes: orderNotes } = req.body;
+    const { dueDate: rawDueDate, notes: orderNotes, downPayment } = req.body;
 
     // 1. Fetch quote FOR UPDATE to lock record
     const [quoteRows] = await conn.query("SELECT * FROM quotations WHERE id = ? FOR UPDATE", [id]);
@@ -745,6 +747,18 @@ export async function acceptAndConvertToOrder(req, res) {
       return res.status(400).json({ message: "Cannot convert a quotation with no items" });
     }
 
+    // Optional down payment taken when the customer accepts
+    let paymentFields = null;
+    if (downPayment && Number(downPayment.amount) > 0) {
+      const quoteTotal = items.reduce((sum, it) => sum + Number(it.subtotal), 0);
+      const { fields, error } = parsePaymentInput({ ...downPayment, paymentType: "down_payment" }, quoteTotal);
+      if (error) {
+        await conn.rollback();
+        return res.status(400).json({ message: `Down payment: ${error}` });
+      }
+      paymentFields = fields;
+    }
+
     // 3. Mark Quotation as accepted
     await conn.query(
       "UPDATE quotations SET status = 'accepted', updated_by = ? WHERE id = ?",
@@ -759,9 +773,9 @@ export async function acceptAndConvertToOrder(req, res) {
     const totalAmount = items.reduce((sum, it) => sum + Number(it.subtotal), 0);
     const totalQuantity = items.reduce((sum, it) => sum + Number(it.quantity), 0);
     const primaryItemName = items.map((i) => i.item_name_snapshot).join(", ").slice(0, 150);
-    const primaryCategory = items[0]?.category_snapshot || "General";
-    const todayStr = new Date().toISOString().slice(0, 10);
-    const dueDate = rawDueDate || (quote.valid_until ? new Date(quote.valid_until).toISOString().slice(0, 10) : todayStr);
+    // soaDate is the database's today (Asia/Manila); new Date().toISOString() would give the UTC date before 8 AM
+    const todayStr = soaDate;
+    const dueDate = rawDueDate || (quote.valid_until ? String(quote.valid_until).slice(0, 10) : todayStr);
 
     const userId = req.user?.id || null;
     const userName = req.user?.full_name || "Employee";
@@ -793,7 +807,6 @@ export async function acceptAndConvertToOrder(req, res) {
     );
 
     // 7. Insert Order Items with pricing snapshots
-    const orderItems = [];
     for (const it of items) {
       const orderItemId = crypto.randomUUID();
       await conn.query(
@@ -820,26 +833,11 @@ export async function acceptAndConvertToOrder(req, res) {
           it.subtotal,
         ]
       );
+    }
 
-      orderItems.push({
-        id: orderItemId,
-        orderId,
-        productServiceId: it.product_service_id,
-        itemName: it.item_name_snapshot,
-        selectedVariant: it.variant_snapshot || null,
-        itemDescription: it.item_description || "",
-        category: it.category_snapshot || "General",
-        itemType: it.item_type,
-        isCustom: Boolean(it.is_custom),
-        quantity: it.quantity,
-        basePrice: Number(it.base_price),
-        finalUnitPrice: Number(it.final_unit_price),
-        priceAdjustmentReason: it.price_adjustment_reason || null,
-        subtotal: Number(it.subtotal),
-        quantityCompleted: 0,
-        productionProgress: 0,
-        productionStatus: "pending",
-      });
+    if (paymentFields) {
+      await insertPayment(conn, orderId, paymentFields, userId);
+      await recalcOrderPayments(conn, orderId);
     }
 
     // 8. Create Notification
@@ -847,7 +845,7 @@ export async function acceptAndConvertToOrder(req, res) {
     const notifDetail = `Quotation ${quote.quote_no} accepted and converted to Order SOA ${soaNo} (Total: ₱${totalAmount.toLocaleString(
       "en-PH",
       { minimumFractionDigits: 2 }
-    )})`;
+    )})${paymentFields ? `. ${describePayment(paymentFields)}` : ""}`;
     const now = new Date();
 
     await conn.query(
@@ -886,39 +884,20 @@ export async function acceptAndConvertToOrder(req, res) {
       entityLabel: `SOA ${soaNo}`,
       description: `Created order SOA ${soaNo} for ${quote.customer_name} from quotation ${quote.quote_no} (${peso(totalAmount)})`,
     });
+    if (paymentFields) {
+      await logAudit(conn, req, {
+        action: "payment.record",
+        category: "payment",
+        entityType: "order",
+        entityId: orderId,
+        entityLabel: `SOA ${soaNo}`,
+        description: `Recorded ${describePayment(paymentFields)} on SOA ${soaNo}`,
+      });
+    }
 
     await conn.commit();
 
-    const createdOrder = {
-      id: orderId,
-      soaNo,
-      soaDate,
-      prNo: null,
-      poNo: null,
-      siOrNo: null,
-      siOrDate: null,
-      drNo: null,
-      drDate: null,
-      quotationId: quote.id,
-      customerName: quote.customer_name,
-      contactNumber: quote.contact_number || "",
-      product: primaryItemName,
-      category: primaryCategory,
-      orderType: "custom",
-      quantity: totalQuantity,
-      quantityCompleted: 0,
-      overallProgress: 0,
-      unitPrice: items[0]?.final_unit_price || 0,
-      totalPrice: totalAmount,
-      amountPaid: 0,
-      balance: totalAmount,
-      paymentStatus: "unpaid",
-      status: "pending",
-      notes: orderNotes || quote.notes || "",
-      dateOrdered: todayStr,
-      dueDate,
-      items: orderItems,
-    };
+    const createdOrder = await loadFullOrder(orderId);
 
     const createdNotif = {
       id: notifId,

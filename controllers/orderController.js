@@ -4,8 +4,15 @@ import crypto from "crypto";
 import { emitOrderCreated, emitOrderUpdated, emitNotification } from "../websocket/socket.js";
 import { DOCUMENT_COLUMNS, DOCUMENT_LABELS, generateSoaNumber, parseDocumentFields } from "../utils/orderDocuments.js";
 import { diffFields, logAudit } from "../utils/auditLog.js";
+import {
+  attachPaymentsToOrders,
+  describePayment,
+  insertPayment,
+  parsePaymentInput,
+  recalcOrderPayments,
+} from "../utils/payments.js";
 
-const ORDER_SELECT = `
+export const ORDER_SELECT = `
   SELECT
     o.id,
     o.soa_no AS soaNo,
@@ -34,10 +41,14 @@ const ORDER_SELECT = `
     COALESCE(o.notes, '') AS notes,
     o.date_ordered AS dateOrdered,
     o.due_date AS dueDate,
-    o.date_completed AS dateCompleted
+    o.date_completed AS dateCompleted,
+    o.cancelled_at AS cancelledAt,
+    o.cancel_reason AS cancelReason,
+    COALESCE(cu.full_name, '') AS cancelledByName
   FROM orders o
   LEFT JOIN customers c ON o.customer_id = c.id
   LEFT JOIN categories cat ON o.category_id = cat.id
+  LEFT JOIN users cu ON o.cancelled_by = cu.id
 `;
 
 const STATUS_LABELS = {
@@ -45,6 +56,7 @@ const STATUS_LABELS = {
   in_production: "In Production",
   ready: "Ready for Pickup",
   completed: "Completed",
+  cancelled: "Cancelled",
 };
 
 const PAYMENT_LABELS = {
@@ -57,8 +69,29 @@ function formatCurrency(n) {
   return "₱" + Number(n || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-// Helper to batch-load order items
-async function attachItemsToOrders(orders) {
+// One order with its items and payments, as the API returns it
+export async function loadFullOrder(id) {
+  const [rows] = await pool.query(`${ORDER_SELECT} WHERE o.id = ?`, [id]);
+  const [fullOrder] = await attachItemsToOrders(rows);
+  return fullOrder || null;
+}
+
+// Inserts a persistent notification and returns it in the shape the socket/frontend expects
+async function insertNotification(conn, { userId, userName, order, customerName, type, detail }) {
+  const id = crypto.randomUUID();
+  const now = new Date();
+  await conn.query(
+    `INSERT INTO notifications (
+      id, user_id, user_name, order_id, order_ref, customer_id, customer_name,
+      notification_type, message, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, userId, userName, order.id, order.soa_no, order.customer_id, customerName, type, detail, now]
+  );
+  return { id, type, user: userName, orderRef: order.soa_no, customerName, detail, timestamp: now, readAt: null };
+}
+
+// Helper to batch-load order items (and payments)
+export async function attachItemsToOrders(orders) {
   if (!orders || orders.length === 0) return [];
   const orderIds = orders.map((o) => o.id);
 
@@ -95,13 +128,15 @@ async function attachItemsToOrders(orders) {
     itemsByOrderId[item.orderId].push(item);
   }
 
-  return orders.map((o) => {
-    const orderItems = itemsByOrderId[o.id] || [];
-    return {
-      ...o,
-      items: orderItems,
-    };
-  });
+  return attachPaymentsToOrders(
+    orders.map((o) => {
+      const orderItems = itemsByOrderId[o.id] || [];
+      return {
+        ...o,
+        items: orderItems,
+      };
+    })
+  );
 }
 
 // GET /api/orders
@@ -153,6 +188,8 @@ export async function createOrder(req, res) {
       dateOrdered: rawDateOrdered,
       dueDate: rawDueDate,
       items: rawItems,
+      downPayment,
+      stockPayment,
     } = req.body;
 
     if (!customerName || !customerName.trim()) {
@@ -196,10 +233,10 @@ export async function createOrder(req, res) {
     }
 
     // 3. Generate SOA Number
-    const todayStr = new Date().toISOString().slice(0, 10);
-    const dateOrdered = rawDateOrdered || todayStr;
-    const dueDate = rawDueDate || dateOrdered;
+    // soaDate is the database's today (Asia/Manila); new Date().toISOString() would give the UTC date before 8 AM
     const { soaNo, soaDate } = await generateSoaNumber(conn);
+    const dateOrdered = rawDateOrdered || soaDate;
+    const dueDate = rawDueDate || dateOrdered;
 
     // 4. Determine items
     let preparedItems = [];
@@ -262,10 +299,30 @@ export async function createOrder(req, res) {
     const totalQuantity = preparedItems.reduce((sum, it) => sum + it.quantity, 0);
     const totalPrice = preparedItems.reduce((sum, it) => sum + it.subtotal, 0);
     const isStock = orderType === "stock";
+
+    // Stock orders are paid in full on the spot; custom orders may come with a down payment.
+    // Either becomes a payments row, and the order's money columns are derived from it below.
+    let initialPayment = null;
+    if (isStock && totalPrice > 0) {
+      // stockPayment: { method (default cash), referenceNo?, orNo?, ... }; the amount is always the full total
+      initialPayment = { ...stockPayment, method: stockPayment?.method || "cash", paymentType: "payment", amount: totalPrice };
+    } else if (!isStock && downPayment && Number(downPayment.amount) > 0) {
+      initialPayment = { ...downPayment, paymentType: "down_payment" };
+    }
+    let paymentFields = null;
+    if (initialPayment) {
+      const { fields, error } = parsePaymentInput(initialPayment, totalPrice);
+      if (error) {
+        await conn.rollback();
+        return res.status(400).json({ message: `${isStock ? "Payment" : "Down payment"}: ${error}` });
+      }
+      paymentFields = fields;
+    }
+
     const quantityCompleted = isStock ? totalQuantity : 0;
-    const amountPaid = isStock ? totalPrice : 0;
-    const balance = isStock ? 0 : totalPrice;
-    const paymentStatus = isStock ? "paid" : "unpaid";
+    const amountPaid = 0;
+    const balance = totalPrice;
+    const paymentStatus = "unpaid";
     const status = isStock ? "completed" : "pending";
     const overallProgress = isStock ? 100 : 0;
     const dateCompleted = isStock ? dateOrdered : null;
@@ -347,9 +404,16 @@ export async function createOrder(req, res) {
       );
     }
 
+    if (paymentFields) {
+      await insertPayment(conn, orderId, paymentFields, userId);
+      await recalcOrderPayments(conn, orderId);
+    }
+
     // 7. Insert Notification
     const notifId = crypto.randomUUID();
-    const notifDetail = `New ${isStock ? "Stock" : "Custom"} Order created — ${productNameSnapshot} (₱${totalPrice.toFixed(2)})`;
+    const notifDetail = `New ${isStock ? "Stock" : "Custom"} Order created — ${productNameSnapshot} (₱${totalPrice.toFixed(2)})${
+      paymentFields ? `. ${describePayment(paymentFields)}` : ""
+    }`;
     const now = new Date();
 
     await conn.query(
@@ -378,34 +442,20 @@ export async function createOrder(req, res) {
       entityLabel: `SOA ${soaNo}`,
       description: `Created ${isStock ? "stock" : "custom"} order SOA ${soaNo} for ${customerName.trim()}: ${productNameSnapshot} (${formatCurrency(totalPrice)})`,
     });
+    if (paymentFields) {
+      await logAudit(conn, req, {
+        action: "payment.record",
+        category: "payment",
+        entityType: "order",
+        entityId: orderId,
+        entityLabel: `SOA ${soaNo}`,
+        description: `Recorded ${describePayment(paymentFields)} on SOA ${soaNo}`,
+      });
+    }
 
     await conn.commit();
 
-    const createdOrder = {
-      id: orderId,
-      soaNo,
-      soaDate,
-      ...documents,
-      customerName: customerName.trim(),
-      contactNumber: contactNumber ? contactNumber.trim() : "",
-      product: productNameSnapshot,
-      category: category ? category.trim() : "General",
-      orderType,
-      quantity: totalQuantity,
-      quantityCompleted,
-      overallProgress,
-      unitPrice: preparedItems[0]?.finalUnitPrice || 0,
-      totalPrice,
-      amountPaid,
-      balance,
-      paymentStatus,
-      status,
-      notes,
-      dateOrdered,
-      dueDate,
-      dateCompleted,
-      items: preparedItems,
-    };
+    const createdOrder = await loadFullOrder(orderId);
 
     const createdNotif = {
       id: notifId,
@@ -431,20 +481,21 @@ export async function createOrder(req, res) {
   }
 }
 
-// PUT /api/orders/:id (General update)
+// PUT /api/orders/:id (General update: production quantity / status for orders without items)
+// Money is never written here: totals come from the items and payments from POST /:id/payments.
+const EDITABLE_STATUSES = ["pending", "in_production", "ready", "completed"];
+
 export async function updateOrder(req, res) {
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
     const { id } = req.params;
-    const {
-      unitPrice: rawPrice,
-      amountPaid: rawPaid,
-      quantity: rawQty,
-      quantityCompleted: rawQtyCompleted,
-      status,
-      paymentStatus,
-    } = req.body;
+    const { quantityCompleted: rawQtyCompleted, status } = req.body;
+
+    if (status != null && !EDITABLE_STATUSES.includes(status)) {
+      await conn.rollback();
+      return res.status(400).json({ message: "Invalid order status" });
+    }
 
     const [existingRows] = await conn.query(
       `SELECT
@@ -466,77 +517,35 @@ export async function updateOrder(req, res) {
     }
 
     const current = existingRows[0];
-    const unitPrice = Number(rawPrice ?? current.unit_price);
-    const amountPaid = Number(rawPaid ?? current.amount_paid);
-    const quantity = Number(rawQty ?? current.quantity);
-    const quantityCompleted = Number(rawQtyCompleted ?? current.quantity_completed);
+    if (current.status === "cancelled") {
+      await conn.rollback();
+      return res.status(400).json({ message: "Cancelled orders can't be updated" });
+    }
+    const quantity = Number(current.quantity);
+    const quantityCompleted = Math.max(0, Math.min(quantity, Number(rawQtyCompleted ?? current.quantity_completed) || 0));
     const newStatus = status || current.status;
-    const newPaymentStatus = paymentStatus || current.payment_status;
 
-    const totalPrice = quantity * unitPrice;
-    const balance = Math.max(totalPrice - amountPaid, 0);
-    const todayStr = new Date().toISOString().slice(0, 10);
-    const dateCompleted = newStatus === "completed" ? (current.date_completed || todayStr) : current.date_completed;
+    const [[{ today }]] = await conn.query("SELECT DATE_FORMAT(CURDATE(), '%Y-%m-%d') AS today");
+    const dateCompleted = newStatus === "completed" ? (current.date_completed || today) : current.date_completed;
     const overallProgress = quantity > 0 ? Math.min(100, Math.round((quantityCompleted / quantity) * 100)) : 0;
 
     const userId = req.user?.id || null;
 
     await conn.query(
       `UPDATE orders SET
-        unit_price = ?,
-        total_price = ?,
-        amount_paid = ?,
-        balance = ?,
-        quantity = ?,
         quantity_completed = ?,
         overall_progress = ?,
         status = ?,
-        payment_status = ?,
         date_completed = ?,
         updated_by = ?
       WHERE id = ?`,
-      [
-        unitPrice,
-        totalPrice,
-        amountPaid,
-        balance,
-        quantity,
-        quantityCompleted,
-        overallProgress,
-        newStatus,
-        newPaymentStatus,
-        dateCompleted,
-        userId,
-        id,
-      ]
+      [quantityCompleted, overallProgress, newStatus, dateCompleted, userId, id]
     );
 
-    // Payment fields and order fields are logged as separate entries so each shows under its own audit category
-    const before = {
-      amountPaid: Number(current.amount_paid),
-      balance: Number(current.balance),
-      paymentStatus: current.payment_status,
-      unitPrice: Number(current.unit_price),
-      totalPrice: Number(current.total_price),
-      quantity: Number(current.quantity),
-      quantityCompleted: Number(current.quantity_completed),
-      status: current.status,
-    };
-    const after = { amountPaid, balance, paymentStatus: newPaymentStatus, unitPrice, totalPrice, quantity, quantityCompleted, status: newStatus };
+    const before = { quantityCompleted: Number(current.quantity_completed), status: current.status };
+    const after = { quantityCompleted, status: newStatus };
     const label = `SOA ${current.soa_no}`;
-    const paymentChanges = diffFields(before, after, ["amountPaid", "balance", "paymentStatus"]);
-    const orderChanges = diffFields(before, after, ["unitPrice", "totalPrice", "quantity", "quantityCompleted", "status"]);
-    if (paymentChanges) {
-      await logAudit(conn, req, {
-        action: "payment.update",
-        category: "payment",
-        entityType: "order",
-        entityId: id,
-        entityLabel: label,
-        description: `Updated payment on ${label}: amount paid ${formatCurrency(before.amountPaid)} → ${formatCurrency(amountPaid)}`,
-        changes: paymentChanges,
-      });
-    }
+    const orderChanges = diffFields(before, after, ["quantityCompleted", "status"]);
     if (orderChanges) {
       await logAudit(conn, req, {
         action: "order.update",
@@ -551,9 +560,7 @@ export async function updateOrder(req, res) {
 
     await conn.commit();
 
-    const [updatedOrderRows] = await pool.query(`${ORDER_SELECT} WHERE o.id = ?`, [id]);
-
-    const [fullOrder] = await attachItemsToOrders(updatedOrderRows);
+    const fullOrder = await loadFullOrder(id);
     emitOrderUpdated(fullOrder);
 
     res.json(fullOrder);
@@ -683,6 +690,10 @@ export async function updateItemProduction(req, res) {
       return res.status(404).json({ message: "Order not found" });
     }
     const order = existingOrders[0];
+    if (order.status === "cancelled") {
+      await conn.rollback();
+      return res.status(400).json({ message: "Cancelled orders can't be updated" });
+    }
 
     // Fetch existing items FOR UPDATE
     const [existingItems] = await conn.query("SELECT * FROM order_items WHERE order_id = ? FOR UPDATE", [id]);
@@ -738,14 +749,14 @@ export async function updateItemProduction(req, res) {
     // Derived overall order production status
     let derivedStatus = "pending";
     if (overallProgress >= 100) {
-      const hasOutstandingBalance = Number(order.total_price) > Number(order.amount_paid);
+      const hasOutstandingBalance = Number(order.balance) > 0;
       derivedStatus = hasOutstandingBalance && !allowIncompletePaymentCompletion ? "ready" : "completed";
     } else if (overallProgress > 0) {
       derivedStatus = "in_production";
     }
 
-    const todayStr = new Date().toISOString().slice(0, 10);
-    const dateCompleted = derivedStatus === "completed" ? (order.date_completed || todayStr) : null;
+    const [[{ today }]] = await conn.query("SELECT DATE_FORMAT(CURDATE(), '%Y-%m-%d') AS today");
+    const dateCompleted = derivedStatus === "completed" ? (order.date_completed || today) : null;
 
     const userId = req.user?.id || null;
     const userName = req.user?.full_name || "Production Team";
@@ -807,9 +818,7 @@ export async function updateItemProduction(req, res) {
     await conn.commit();
 
     // Fetch updated order with items to return and broadcast
-    const [updatedOrderRows] = await pool.query(`${ORDER_SELECT} WHERE o.id = ?`, [id]);
-
-    const [fullOrder] = await attachItemsToOrders(updatedOrderRows);
+    const fullOrder = await loadFullOrder(id);
     emitOrderUpdated(fullOrder);
 
     res.json({
@@ -825,99 +834,272 @@ export async function updateItemProduction(req, res) {
   }
 }
 
-// POST /api/orders/:id/payment
-// RECORD FINANCIAL TRANSACTION SETTLEMENT
+// Locks the order row and returns it with the customer name, or null
+async function lockOrder(conn, id) {
+  const [rows] = await conn.query(
+    `SELECT o.*, COALESCE(c.full_name, '') AS customerName
+    FROM orders o
+    LEFT JOIN customers c ON o.customer_id = c.id
+    WHERE o.id = ? FOR UPDATE`,
+    [id]
+  );
+  return rows[0] || null;
+}
+
+// Free-text reason for voids and cancellations: required, max 500 characters
+function parseReason(body, action) {
+  const reason = typeof body?.reason === "string" ? body.reason.trim() : "";
+  if (!reason) return { error: `A reason is required to ${action}` };
+  if (reason.length > 500) return { error: "Reason must be 500 characters or fewer" };
+  return { reason };
+}
+
+// GET /api/orders/:id/payments
+export async function getOrderPayments(req, res) {
+  try {
+    const order = await loadFullOrder(req.params.id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+    res.json(order.payments);
+  } catch (err) {
+    console.error("getOrderPayments error:", err);
+    res.status(500).json({ message: "Failed to fetch payments" });
+  }
+}
+
+// POST /api/orders/:id/payments
+// Records a down payment, payment or EWT entry; the order's amount paid / balance / status follow from the log
 export async function recordPayment(req, res) {
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
     const { id } = req.params;
-    const { amount: rawAmount, paymentMethod = "Cash", note = "" } = req.body;
 
-    const amount = Number(rawAmount) || 0;
-    if (amount <= 0) {
-      await conn.rollback();
-      return res.status(400).json({ message: "Payment amount must be greater than 0" });
-    }
-
-    const [orderRows] = await conn.query("SELECT * FROM orders WHERE id = ? FOR UPDATE", [id]);
-    if (orderRows.length === 0) {
+    const order = await lockOrder(conn, id);
+    if (!order) {
       await conn.rollback();
       return res.status(404).json({ message: "Order not found" });
     }
+    if (order.status === "cancelled") {
+      await conn.rollback();
+      return res.status(400).json({ message: "Payments can't be recorded on a cancelled order" });
+    }
 
-    const order = orderRows[0];
-    const currentPaid = Number(order.amount_paid);
-    const totalPrice = Number(order.total_price);
-    const newPaid = Math.min(totalPrice, currentPaid + amount);
-    const newBalance = Math.max(0, totalPrice - newPaid);
-    const newPaymentStatus = newBalance === 0 ? "paid" : "partial";
+    const { fields, error } = parsePaymentInput(req.body, Number(order.balance));
+    if (error) {
+      await conn.rollback();
+      return res.status(400).json({ message: error });
+    }
 
     const userId = req.user?.id || null;
-    const userName = req.user?.full_name || "Billing Staff";
+    const userName = req.user?.full_name || "Staff";
+    await insertPayment(conn, id, fields, userId);
+    const after = await recalcOrderPayments(conn, id);
 
-    // 1. Insert into payments log
-    const paymentId = crypto.randomUUID();
-    await conn.query(
-      `INSERT INTO payments (id, order_id, amount, payment_method, note, created_by, received_at)
-       VALUES (?, ?, ?, ?, ?, ?, NOW())`,
-      [paymentId, id, amount, paymentMethod, note ? note.trim() : null, userId]
-    );
+    // A finished order that was only waiting on payment completes once the balance is settled
+    let statusNote = "";
+    if (order.status === "ready" && after.balance === 0 && Number(order.overall_progress) >= 100) {
+      await conn.query(
+        "UPDATE orders SET status = 'completed', date_completed = COALESCE(date_completed, CURDATE()) WHERE id = ?",
+        [id]
+      );
+      statusNote = " Order is now Completed.";
+    }
 
-    // 2. Update order financial state
-    await conn.query(
-      `UPDATE orders SET
-        amount_paid = ?,
-        balance = ?,
-        payment_status = ?,
-        updated_by = ?
-      WHERE id = ?`,
-      [newPaid, newBalance, newPaymentStatus, userId, id]
-    );
-
-    // 3. Create persistent notification
-    const notifId = crypto.randomUUID();
-    const notifDetail = `Payment of ${formatCurrency(amount)} recorded for SOA ${order.soa_no} via ${paymentMethod}. New balance: ${formatCurrency(newBalance)}`;
-
-    await conn.query(
-      `INSERT INTO notifications (
-        id, user_id, user_name, order_id, order_ref, customer_id, customer_name,
-        notification_type, message, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, (SELECT full_name FROM customers WHERE id = ?), 'detail_update', ?, NOW())`,
-      [notifId, userId, userName, id, order.soa_no, order.customer_id, order.customer_id, notifDetail]
-    );
+    const label = `SOA ${order.soa_no}`;
+    const detail = `${describePayment(fields)} recorded for ${label}. New balance: ${formatCurrency(after.balance)}.${statusNote}`;
+    const notification = await insertNotification(conn, {
+      userId,
+      userName,
+      order,
+      customerName: order.customerName,
+      type: "detail_update",
+      detail,
+    });
 
     await logAudit(conn, req, {
       action: "payment.record",
       category: "payment",
       entityType: "order",
       entityId: id,
-      entityLabel: `SOA ${order.soa_no}`,
-      description: notifDetail,
+      entityLabel: label,
+      description: detail,
       changes: diffFields(
-        { amountPaid: currentPaid, balance: Number(order.balance), paymentStatus: order.payment_status },
-        { amountPaid: newPaid, balance: newBalance, paymentStatus: newPaymentStatus },
+        { amountPaid: Number(order.amount_paid), balance: Number(order.balance), paymentStatus: order.payment_status },
+        after,
         ["amountPaid", "balance", "paymentStatus"]
       ),
     });
 
     await conn.commit();
 
-    // Fetch updated order with items
-    const [updatedOrderRows] = await pool.query(`${ORDER_SELECT} WHERE o.id = ?`, [id]);
-
-    const [fullOrder] = await attachItemsToOrders(updatedOrderRows);
+    const fullOrder = await loadFullOrder(id);
     emitOrderUpdated(fullOrder);
-
-    res.json({
-      message: "Payment recorded successfully",
-      payment: { id: paymentId, amount, paymentMethod, balance: newBalance, paymentStatus: newPaymentStatus },
-      order: fullOrder,
-    });
+    emitNotification(notification);
+    res.status(201).json(fullOrder);
   } catch (err) {
     await conn.rollback();
     console.error("recordPayment error:", err);
     res.status(500).json({ message: "Failed to record payment" });
+  } finally {
+    conn.release();
+  }
+}
+
+// PATCH /api/orders/:id/payments/:paymentId/void (admin)
+// Payments are never deleted; a voided entry stays visible but no longer counts
+export async function voidPayment(req, res) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const { id, paymentId } = req.params;
+    const { reason, error } = parseReason(req.body, "void a payment");
+    if (error) {
+      await conn.rollback();
+      return res.status(400).json({ message: error });
+    }
+
+    const order = await lockOrder(conn, id);
+    if (!order) {
+      await conn.rollback();
+      return res.status(404).json({ message: "Order not found" });
+    }
+    const [[payment]] = await conn.query(
+      `SELECT payment_type AS paymentType, method, CAST(amount AS DOUBLE) AS amount,
+        reference_no AS referenceNo, voided_at AS voidedAt
+      FROM payments WHERE id = ? AND order_id = ? FOR UPDATE`,
+      [paymentId, id]
+    );
+    if (!payment) {
+      await conn.rollback();
+      return res.status(404).json({ message: "Payment not found" });
+    }
+    if (payment.voidedAt) {
+      await conn.rollback();
+      return res.status(400).json({ message: "This payment is already voided" });
+    }
+
+    const userId = req.user?.id || null;
+    const userName = req.user?.full_name || "Admin";
+    await conn.query("UPDATE payments SET voided_at = NOW(), voided_by = ?, void_reason = ? WHERE id = ?", [
+      userId,
+      reason,
+      paymentId,
+    ]);
+    const after = await recalcOrderPayments(conn, id);
+
+    const label = `SOA ${order.soa_no}`;
+    const detail = `Voided ${describePayment(payment)} on ${label}: ${reason}. New balance: ${formatCurrency(after.balance)}`;
+    const notification = await insertNotification(conn, {
+      userId,
+      userName,
+      order,
+      customerName: order.customerName,
+      type: "detail_update",
+      detail,
+    });
+
+    await logAudit(conn, req, {
+      action: "payment.void",
+      category: "payment",
+      entityType: "order",
+      entityId: id,
+      entityLabel: label,
+      description: detail,
+      changes: diffFields(
+        { amountPaid: Number(order.amount_paid), balance: Number(order.balance), paymentStatus: order.payment_status },
+        after,
+        ["amountPaid", "balance", "paymentStatus"]
+      ),
+    });
+
+    await conn.commit();
+
+    const fullOrder = await loadFullOrder(id);
+    emitOrderUpdated(fullOrder);
+    emitNotification(notification);
+    res.json(fullOrder);
+  } catch (err) {
+    await conn.rollback();
+    console.error("voidPayment error:", err);
+    res.status(500).json({ message: "Failed to void payment" });
+  } finally {
+    conn.release();
+  }
+}
+
+// POST /api/orders/:id/cancel (admin)
+// The order and its SOA No stay on record as cancelled. Payments must be voided first so no money is left on it.
+export async function cancelOrder(req, res) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const { id } = req.params;
+    const { reason, error } = parseReason(req.body, "cancel an order");
+    if (error) {
+      await conn.rollback();
+      return res.status(400).json({ message: error });
+    }
+
+    const order = await lockOrder(conn, id);
+    if (!order) {
+      await conn.rollback();
+      return res.status(404).json({ message: "Order not found" });
+    }
+    if (order.status === "cancelled") {
+      await conn.rollback();
+      return res.status(400).json({ message: "This order is already cancelled" });
+    }
+    const [[{ activePayments }]] = await conn.query(
+      "SELECT COUNT(*) AS activePayments FROM payments WHERE order_id = ? AND voided_at IS NULL",
+      [id]
+    );
+    if (activePayments > 0) {
+      await conn.rollback();
+      return res.status(400).json({
+        message: `This order still has ${activePayments} payment${activePayments === 1 ? "" : "s"} recorded. Void ${
+          activePayments === 1 ? "it" : "them"
+        } (refund the customer) before cancelling.`,
+      });
+    }
+
+    const userId = req.user?.id || null;
+    const userName = req.user?.full_name || "Admin";
+    await conn.query(
+      "UPDATE orders SET status = 'cancelled', cancelled_at = NOW(), cancelled_by = ?, cancel_reason = ?, updated_by = ? WHERE id = ?",
+      [userId, reason, userId, id]
+    );
+
+    const label = `SOA ${order.soa_no}`;
+    const detail = `${label} was cancelled: ${reason}`;
+    const notification = await insertNotification(conn, {
+      userId,
+      userName,
+      order,
+      customerName: order.customerName,
+      type: "status_update",
+      detail,
+    });
+
+    await logAudit(conn, req, {
+      action: "order.cancel",
+      category: "order",
+      entityType: "order",
+      entityId: id,
+      entityLabel: label,
+      description: detail,
+      changes: { status: { from: order.status, to: "cancelled" } },
+    });
+
+    await conn.commit();
+
+    const fullOrder = await loadFullOrder(id);
+    emitOrderUpdated(fullOrder);
+    emitNotification(notification);
+    res.json(fullOrder);
+  } catch (err) {
+    await conn.rollback();
+    console.error("cancelOrder error:", err);
+    res.status(500).json({ message: "Failed to cancel order" });
   } finally {
     conn.release();
   }

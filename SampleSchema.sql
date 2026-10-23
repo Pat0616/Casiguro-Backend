@@ -211,6 +211,9 @@ CREATE TABLE IF NOT EXISTS orders (
   date_ordered DATE NOT NULL,
   due_date DATE,
   date_completed DATE,
+  cancelled_at TIMESTAMP NULL,              -- set when an admin cancels the order (SOA No stays used)
+  cancelled_by CHAR(36) NULL,
+  cancel_reason TEXT NULL,
 
   created_by CHAR(36),
   updated_by CHAR(36),
@@ -231,7 +234,7 @@ CREATE TABLE IF NOT EXISTS orders (
     CHECK (payment_status IN ('unpaid', 'partial', 'paid')),
 
   CONSTRAINT chk_orders_status
-    CHECK (status IN ('pending', 'in_production', 'ready', 'completed')),
+    CHECK (status IN ('pending', 'in_production', 'ready', 'completed', 'cancelled')),
 
   CONSTRAINT fk_orders_customer
     FOREIGN KEY (customer_id)
@@ -421,19 +424,33 @@ CREATE TABLE IF NOT EXISTS order_events (
 ) ENGINE=InnoDB;
 
 -- ========================================================
--- 11. PAYMENTS (Receipts & installment logs)
+-- 11. PAYMENTS (Down payments, payments & EWT; orders.amount_paid/balance/payment_status are derived from these)
+-- Rows are never deleted: a wrong entry is voided (voided_at/by/reason) and stops counting.
 -- ========================================================
 CREATE TABLE IF NOT EXISTS payments (
-  id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
+  id CHAR(36) PRIMARY KEY,
 
   order_id CHAR(36) NOT NULL,
+  payment_type VARCHAR(20) NOT NULL DEFAULT 'payment',   -- down_payment | payment | ewt (withholding tax, BIR 2307)
+  method VARCHAR(20) NULL,                               -- cash | gcash | check | bank_transfer; NULL for EWT and backfilled rows
   amount DECIMAL(12,2) NOT NULL,
-  payment_method VARCHAR(50),
+  received_on DATE NOT NULL,
+  reference_no VARCHAR(100) NULL,                        -- GCash/bank reference, check no., or 2307 certificate no.
+  check_bank VARCHAR(100) NULL,
+  check_date DATE NULL,
+  or_no VARCHAR(50) NULL,                                -- Official Receipt No issued for this payment
+  note TEXT NULL,
 
-  received_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  note TEXT,
-  created_by CHAR(36),
+  voided_at TIMESTAMP NULL,
+  voided_by CHAR(36) NULL,
+  void_reason TEXT NULL,
+
+  created_by CHAR(36) NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  CONSTRAINT chk_payments_type CHECK (payment_type IN ('down_payment', 'payment', 'ewt')),
+  CONSTRAINT chk_payments_method CHECK (method IS NULL OR method IN ('cash', 'gcash', 'check', 'bank_transfer')),
+  CONSTRAINT chk_payments_amount CHECK (amount > 0),
 
   CONSTRAINT fk_payments_order
     FOREIGN KEY (order_id)
@@ -447,7 +464,14 @@ CREATE TABLE IF NOT EXISTS payments (
     ON DELETE SET NULL
     ON UPDATE CASCADE,
 
-  INDEX idx_payments_order_id (order_id)
+  CONSTRAINT fk_payments_voided_by
+    FOREIGN KEY (voided_by)
+    REFERENCES users(id)
+    ON DELETE SET NULL
+    ON UPDATE CASCADE,
+
+  INDEX idx_payments_order_id (order_id),
+  INDEX idx_payments_received_on (received_on)
 ) ENGINE=InnoDB;
 
 -- ========================================================

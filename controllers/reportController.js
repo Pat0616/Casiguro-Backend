@@ -1,6 +1,7 @@
 // backend/controllers/reportController.js
 import pool from "../database/db.js";
 import { buildSalesWorkbook } from "../utils/salesWorkbook.js";
+import { attachPaymentsToOrders } from "../utils/payments.js";
 
 // GET /api/reports/sales.xlsx?mode=year|month&year=YYYY&month=M
 // Orders belong to the period of their order date (date_ordered), paid or not, like the business's own sheet.
@@ -24,20 +25,18 @@ export async function exportSalesExcel(req, res) {
       ? [`${year}-01-01`, `${year + 1}-01-01`]
       : [`${year}-${pad(month)}-01`, month === 12 ? `${year + 1}-01-01` : `${year}-${pad(month + 1)}-01`];
 
-    // TOTAL is the sum of the item subtotals: updateOrder can overwrite orders.total_price with
-    // quantity × first item's price on multi-item orders (known issue), so the items are the reliable figure.
     // Within a day, order by SOA sequence (YYYY-MM-N) so the list reads like the paper J.O. numbering
-    const [rows] = await pool.query(
+    const [orders] = await pool.query(
       `SELECT
+        o.id,
         o.soa_no AS soaNo,
         o.si_or_no AS siOrNo,
         COALESCE(c.full_name, '') AS customerName,
-        CAST(COALESCE(
-          (SELECT SUM(i.subtotal) FROM order_items i WHERE i.order_id = o.id),
-          o.total_price
-        ) AS DOUBLE) AS totalPrice,
+        CAST(o.total_price AS DOUBLE) AS totalPrice,
         CAST(o.amount_paid AS DOUBLE) AS amountPaid,
         o.payment_status AS paymentStatus,
+        o.status,
+        o.cancel_reason AS cancelReason,
         o.date_ordered AS dateOrdered
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
@@ -46,6 +45,10 @@ export async function exportSalesExcel(req, res) {
         CAST(SUBSTRING_INDEX(o.soa_no, '-', -1) AS UNSIGNED) ASC`,
       [from, to]
     );
+    const rows = (await attachPaymentsToOrders(orders)).map((o) => ({
+      ...o,
+      payments: o.payments.filter((p) => !p.voidedAt),
+    }));
 
     const period = { mode, year, month: mode === "month" ? month : undefined };
     const buffer = await buildSalesWorkbook(rows, period).xlsx.writeBuffer();
