@@ -702,10 +702,29 @@ export async function updateItemProduction(req, res) {
     const updatesToApply = [];
     if (Array.isArray(updatedItemsList) && updatedItemsList.length > 0) {
       for (const u of updatedItemsList) {
-        updatesToApply.push({ id: u.id, quantityCompleted: Number(u.quantityCompleted) || 0 });
+        updatesToApply.push({
+          id: u.id,
+          quantityCompleted: Number(u.quantityCompleted) || 0,
+          previousQuantityCompleted: u.previousQuantityCompleted,
+        });
       }
     } else if (itemId) {
       updatesToApply.push({ id: itemId, quantityCompleted: Number(singleQtyCompleted) || 0 });
+    }
+
+    // Optimistic concurrency: the client sends the value it started from. If someone saved this item since,
+    // refuse the whole save instead of silently overwriting their progress.
+    for (const update of updatesToApply) {
+      const match = existingItems.find((it) => it.id === update.id);
+      if (!match || update.previousQuantityCompleted == null) continue;
+      if (Number(update.previousQuantityCompleted) !== Number(match.quantity_completed)) {
+        await conn.rollback();
+        const itemLabel = match.variant_snapshot ? `${match.item_name_snapshot} (${match.variant_snapshot})` : match.item_name_snapshot;
+        return res.status(409).json({
+          message: `${itemLabel} was updated by someone else (now ${match.quantity_completed}/${match.quantity}). Your changes were not saved.`,
+          conflict: true,
+        });
+      }
     }
 
     const itemChanges = {};
