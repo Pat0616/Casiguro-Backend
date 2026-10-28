@@ -73,13 +73,31 @@ function sendLimitError(row) {
   return null;
 }
 
+// Nodemailer error codes that mean the server can't reach the mail service at all
+const MAIL_NETWORK_ERRORS = new Set(["ECONNECTION", "ETIMEDOUT", "ESOCKET", "EDNS"]);
+
+// Sends the code. On failure, answers the request and returns false. Problems with the server's own mail settings
+// get a message the applicant can act on (tell an admin) instead of one blaming their address.
 async function emailCode(res, email, fullName, code) {
   try {
     await sendVerificationCode(email, fullName, code, CODE_TTL_MINUTES);
     return true;
   } catch (err) {
-    console.error("Verification email failed:", err);
-    res.status(502).json({ message: "We couldn't send the verification email. Check the address and try again." });
+    if (err.code === "EAUTH") {
+      console.error(
+        "Verification email failed: Gmail rejected MAIL_USER / MAIL_APP_PASSWORD in .env. " +
+          "MAIL_APP_PASSWORD must be a 16-letter Google App Password (needs 2-Step Verification), not the account password. " +
+          "Restart the server after changing .env.",
+        `(${err.responseCode ?? ""} ${err.response ?? err.message})`
+      );
+      res.status(503).json({ message: "Email sending isn't set up correctly. Please contact an administrator." });
+    } else if (MAIL_NETWORK_ERRORS.has(err.code)) {
+      console.error("Verification email failed: could not reach the mail server.", err.code, err.message);
+      res.status(503).json({ message: "We couldn't reach the email service. Please try again in a few minutes." });
+    } else {
+      console.error("Verification email failed:", err);
+      res.status(502).json({ message: "We couldn't send the verification email. Check the address and try again." });
+    }
     return false;
   }
 }
