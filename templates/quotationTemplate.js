@@ -79,7 +79,7 @@ const BRAND = {
 
 /**
  * @param {object} data
- * @param {object} data.quotation  quoteNo, customerName, contactNumber, totalAmount, preparedBy, validUntil
+ * @param {object} data.quotation  quoteNo, customerName, contactNumber, totalAmount, validUntil
  * @param {object[]} data.items    itemName, selectedVariant, quantity, finalUnitPrice, subtotal
  * @param {object|null} data.order converted order's soaNo, soaDate, prNo, poNo, siOrNo, siOrDate, drNo, drDate
  */
@@ -238,7 +238,8 @@ export function renderQuotationHtml({ quotation, items, order }) {
       <div class="signatures">
         <div class="sig">
           <div class="heading">PREPARED BY:</div>
-          <div class="name">${escapeHtml((quotation.preparedBy || "").toUpperCase())}</div>
+          <!-- Left blank: the preparer writes their name and signs by hand -->
+          <div class="name"></div>
           <div class="line">PRINT NAME AND SIGNATURE</div>
         </div>
         <div class="sig">

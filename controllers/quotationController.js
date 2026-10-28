@@ -190,10 +190,8 @@ export async function getQuotationPdf(req, res) {
         q.customer_name AS customerName,
         COALESCE(q.contact_number, '') AS contactNumber,
         CAST(q.total_amount AS DOUBLE) AS totalAmount,
-        q.valid_until AS validUntil,
-        COALESCE(u.full_name, '') AS preparedBy
+        q.valid_until AS validUntil
       FROM quotations q
-      LEFT JOIN users u ON q.created_by = u.id
       WHERE q.id = ?`,
       [id]
     );
