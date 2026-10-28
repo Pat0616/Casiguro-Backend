@@ -16,7 +16,8 @@ const ALL_BORDERS = { top: BORDER, left: BORDER, bottom: BORDER, right: BORDER }
 const HEADER_FILL = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9E1F2" } };
 const CANCELLED_FONT = { color: { argb: "FF9CA3AF" }, italic: true };
 
-// Column order and headers follow their sheet. J.O. NO. is the SOA No. As in their sheet, BALANCE is what was
+// Column order and headers follow their sheet. J.O. NO. is the Job Order No staff typed on the order (blank if
+// none). As in their sheet, BALANCE is what was
 // left after the down payment (TOTAL − DP); anything still unpaid today is noted in REMARKS.
 // CASH holds every non-check payment (cash, GCash, bank transfer); the method is noted in REMARKS like they do.
 const MONITORING_COLUMNS = [
@@ -75,7 +76,7 @@ function monitoringValues(order) {
   const base = {
     date: toExcelDate(order.dateOrdered),
     client: (order.customerName || "WALK-IN").toUpperCase(),
-    joNo: order.soaNo,
+    joNo: order.joNo || null,
     siNo: order.siOrNo || null,
   };
   if (isCancelled(order)) {

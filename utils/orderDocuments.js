@@ -4,6 +4,7 @@
 export const DOCUMENT_COLUMNS = {
   prNo: "pr_no",
   poNo: "po_no",
+  joNo: "jo_no",
   siOrNo: "si_or_no",
   siOrDate: "si_or_date",
   drNo: "dr_no",
@@ -13,6 +14,7 @@ export const DOCUMENT_COLUMNS = {
 export const DOCUMENT_LABELS = {
   prNo: "PR No",
   poNo: "PO No",
+  joNo: "J.O. No",
   siOrNo: "SI/OR No",
   siOrDate: "SI/OR Date",
   drNo: "DR No",

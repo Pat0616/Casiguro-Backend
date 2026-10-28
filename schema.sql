@@ -196,6 +196,7 @@ CREATE TABLE IF NOT EXISTS orders (
   soa_date DATE NOT NULL,                   -- Date the order was created (system-assigned)
   pr_no VARCHAR(50) NULL,                   -- Customer's Purchase Request No
   po_no VARCHAR(50) NULL,                   -- Customer's Purchase Order No
+  jo_no VARCHAR(50) NULL,                   -- Job Order No
   si_or_no VARCHAR(50) NULL,                -- Sales Invoice / Official Receipt No
   si_or_date DATE NULL,
   dr_no VARCHAR(50) NULL,                   -- Delivery Receipt No

@@ -19,6 +19,7 @@ export const ORDER_SELECT = `
     o.soa_date AS soaDate,
     o.pr_no AS prNo,
     o.po_no AS poNo,
+    o.jo_no AS joNo,
     o.si_or_no AS siOrNo,
     o.si_or_date AS siOrDate,
     o.dr_no AS drNo,
@@ -335,19 +336,20 @@ export async function createOrder(req, res) {
     // 5. Insert Order
     await conn.query(
       `INSERT INTO orders (
-        id, soa_no, soa_date, pr_no, po_no, si_or_no, si_or_date, dr_no, dr_date,
+        id, soa_no, soa_date, pr_no, po_no, jo_no, si_or_no, si_or_date, dr_no, dr_date,
         customer_id, category_id, product_name_snapshot,
         order_type, quantity, quantity_completed, overall_progress,
         unit_price, total_price, amount_paid, balance,
         payment_status, status, notes,
         date_ordered, due_date, date_completed, created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         orderId,
         soaNo,
         soaDate,
         documents.prNo,
         documents.poNo,
+        documents.joNo,
         documents.siOrNo,
         documents.siOrDate,
         documents.drNo,

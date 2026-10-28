@@ -25,11 +25,12 @@ export async function exportSalesExcel(req, res) {
       ? [`${year}-01-01`, `${year + 1}-01-01`]
       : [`${year}-${pad(month)}-01`, month === 12 ? `${year + 1}-01-01` : `${year}-${pad(month + 1)}-01`];
 
-    // Within a day, order by SOA sequence (YYYY-MM-N) so the list reads like the paper J.O. numbering
+    // Within a day, order by SOA sequence (YYYY-MM-N) so rows keep the order they were created in
     const [orders] = await pool.query(
       `SELECT
         o.id,
         o.soa_no AS soaNo,
+        o.jo_no AS joNo,
         o.si_or_no AS siOrNo,
         COALESCE(c.full_name, '') AS customerName,
         CAST(o.total_price AS DOUBLE) AS totalPrice,
