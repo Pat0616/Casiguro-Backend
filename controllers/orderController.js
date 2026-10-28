@@ -115,8 +115,11 @@ export async function attachItemsToOrders(orders) {
       CAST(oi.subtotal AS DOUBLE) AS subtotal,
       oi.quantity_completed AS quantityCompleted,
       oi.production_progress AS productionProgress,
-      oi.production_status AS productionStatus
+      oi.production_status AS productionStatus,
+      p.image_url AS imageUrl
     FROM order_items oi
+    -- Current catalog image (custom lines and removed catalog items have none)
+    LEFT JOIN products p ON p.id = oi.product_service_id
     WHERE oi.order_id IN (?)
     ORDER BY oi.id ASC`,
     [orderIds]
