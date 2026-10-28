@@ -4,6 +4,7 @@ import bcrypt from "bcryptjs";
 import pool from "../database/db.js";
 import { AUDIT_CATEGORIES, logAudit } from "../utils/auditLog.js";
 import { emitAccountChanged } from "../websocket/socket.js";
+import { sendAccountDeactivatedEmail } from "../utils/mailer.js";
 
 export const PROMOTE_CONFIRMATION_PHRASE = "Confirm Account Admin For Casiguro";
 const MAX_REASON_LENGTH = 500;
@@ -115,7 +116,7 @@ export async function getPendingCount(req, res) {
   }
 }
 
-// Shared runner for approve / reject / deactivate / reactivate
+// Shared runner for approve / reject / reactivate (deactivate has its own handler with extra checks)
 async function changeStatus(req, res, { allowedStatuses, newStatus, actionLabel, auditAction, describe, reasonRequired = false }) {
   const conn = await pool.getConnection();
   try {
@@ -188,16 +189,78 @@ export function rejectAccount(req, res) {
   });
 }
 
-// PATCH /api/accounts/:id/deactivate  { reason? }
+// PATCH /api/accounts/:id/deactivate  { reason, password, confirmEmail? }
+// Needs a reason and the acting admin's own password; deactivating an ADMIN also needs their email typed exactly.
+// Wrong password / email attempts are refused and logged. A deactivated admin is emailed who did it and why.
 // Self-deactivation is refused, so the acting admin always remains: the last admin can never be locked out.
-export function deactivateAccount(req, res) {
-  return changeStatus(req, res, {
-    allowedStatuses: ["active"],
-    newStatus: "deactivated",
-    actionLabel: "deactivate",
-    auditAction: "account.deactivate",
-    describe: (t, reason) => `Deactivated ${t.role} account ${t.full_name} (${t.email})${reason ? `: ${reason}` : ""}`,
-  });
+export async function deactivateAccount(req, res) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const target = await loadTargetForChange(conn, req, res, { allowedStatuses: ["active"], actionLabel: "deactivate" });
+    if (!target) {
+      await conn.rollback();
+      return;
+    }
+
+    const reason = cleanReason(req.body?.reason);
+    if (!reason) {
+      await conn.rollback();
+      return res.status(400).json({ message: "Please give a reason." });
+    }
+
+    const isAdmin = target.role === "admin";
+    const [selfRows] = await conn.query("SELECT password FROM users WHERE id = ?", [req.user.id]);
+    const passwordOk = await bcrypt.compare(String(req.body?.password || ""), selfRows[0]?.password || "");
+    const emailOk =
+      !isAdmin || String(req.body?.confirmEmail || "").trim().toLowerCase() === String(target.email).toLowerCase();
+
+    if (!passwordOk || !emailOk) {
+      await conn.rollback();
+      // Logged outside the rolled-back transaction so the failed attempt is kept
+      await logAudit(pool, req, {
+        action: "account.deactivate_failed",
+        category: "account",
+        entityType: "user",
+        entityId: target.id,
+        entityLabel: target.full_name,
+        description: `Failed attempt to deactivate ${target.role} account ${target.full_name} (${!passwordOk ? "wrong password" : "email did not match"})`,
+      });
+      return res.status(400).json({
+        message: !passwordOk ? "Your password is incorrect." : "The email doesn't match this account.",
+      });
+    }
+
+    await conn.query(
+      "UPDATE users SET status = 'deactivated', status_changed_by = ?, status_changed_at = NOW(), status_reason = ? WHERE id = ?",
+      [req.user.id, reason, target.id]
+    );
+    await logAudit(conn, req, {
+      action: "account.deactivate",
+      category: "account",
+      entityType: "user",
+      entityId: target.id,
+      entityLabel: target.full_name,
+      description: `Deactivated ${target.role} account ${target.full_name} (${target.email}): ${reason}`,
+      changes: { status: { from: target.status, to: "deactivated" } },
+    });
+    await conn.commit();
+
+    emitAccountChanged({ userId: target.id, status: "deactivated" });
+    if (isAdmin) {
+      // Not awaited: a mail problem must never undo or delay the deactivation
+      sendAccountDeactivatedEmail(target.email, target.full_name, { byName: req.user.full_name || "An administrator", reason }).catch(
+        (err) => console.error("Deactivation email failed:", err.code || "", err.message)
+      );
+    }
+    res.json(await fetchAccount(pool, target.id));
+  } catch (err) {
+    await conn.rollback();
+    console.error("account.deactivate error:", err);
+    res.status(500).json({ message: "Failed to update the account" });
+  } finally {
+    conn.release();
+  }
 }
 
 // PATCH /api/accounts/:id/reactivate
