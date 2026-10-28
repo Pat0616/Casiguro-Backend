@@ -41,6 +41,17 @@ function validateVariants(value) {
   return { valid: true, variants };
 }
 
+const MAX_CATEGORY_NAME = 100; // categories.name VARCHAR(100)
+
+function categoryNameError(categoryValue) {
+  if (typeof categoryValue === "string" && categoryValue.trim().length > MAX_CATEGORY_NAME) {
+    return `Category name must be ${MAX_CATEGORY_NAME} characters or fewer`;
+  }
+  return null;
+}
+
+// Accepts an existing category id or a name. A name that doesn't exist yet becomes a new category
+// (matching is case-insensitive via the column collation, so "apparel" reuses "Apparel").
 async function resolveCategoryId(categoryValue) {
   if (typeof categoryValue !== "string" || !categoryValue.trim()) return null;
   const value = categoryValue.trim();
@@ -138,6 +149,11 @@ export async function createCatalogItem(req, res) {
       return res.status(400).json({ message: "Each option must have a unique name and a valid non-negative price." });
     }
 
+    const categoryError = categoryNameError(categoryId);
+    if (categoryError) {
+      return res.status(400).json({ message: categoryError });
+    }
+
     const price = Math.max(0, Number(basePrice) || 0);
     const id = crypto.randomUUID();
 
@@ -217,6 +233,11 @@ export async function updateCatalogItem(req, res) {
     const [existing] = await pool.query("SELECT * FROM products WHERE id = ?", [id]);
     if (existing.length === 0) {
       return res.status(404).json({ message: "Catalog item not found" });
+    }
+
+    const categoryError = categoryNameError(categoryId);
+    if (categoryError) {
+      return res.status(400).json({ message: categoryError });
     }
 
     const current = existing[0];
