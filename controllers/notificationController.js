@@ -12,6 +12,7 @@ export async function getNotifications(req, res) {
       SELECT
         n.id,
         n.notification_type AS type,
+        n.event,
         COALESCE(n.user_name, 'Staff') AS user,
         COALESCE(n.order_ref, '') AS orderRef,
         COALESCE(n.customer_name, '') AS customerName,

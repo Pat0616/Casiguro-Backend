@@ -15,7 +15,8 @@
     "migrate:accounts-audit": "node scripts/migrate_accounts_audit.js",
     "migrate:payments": "node scripts/migrate_payments.js",
     "migrate:email-verifications": "node scripts/migrate_email_verifications.js",
-    "migrate:jo-number": "node scripts/migrate_jo_number.js"
+    "migrate:jo-number": "node scripts/migrate_jo_number.js",
+    "migrate:notification-events": "node scripts/migrate_notification_events.js"
   },
   "author": "",
   "license": "ISC",

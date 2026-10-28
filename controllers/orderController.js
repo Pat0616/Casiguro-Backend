@@ -77,18 +77,19 @@ export async function loadFullOrder(id) {
   return fullOrder || null;
 }
 
-// Inserts a persistent notification and returns it in the shape the socket/frontend expects
-async function insertNotification(conn, { userId, userName, order, customerName, type, detail }) {
+// Inserts a persistent notification and returns it in the shape the socket/frontend expects.
+// `event` is the exact action (e.g. payment.void); the frontend picks the icon from it.
+async function insertNotification(conn, { userId, userName, order, customerName, type, event, detail }) {
   const id = crypto.randomUUID();
   const now = new Date();
   await conn.query(
     `INSERT INTO notifications (
       id, user_id, user_name, order_id, order_ref, customer_id, customer_name,
-      notification_type, message, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [id, userId, userName, order.id, order.soa_no, order.customer_id, customerName, type, detail, now]
+      notification_type, event, message, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, userId, userName, order.id, order.soa_no, order.customer_id, customerName, type, event, detail, now]
   );
-  return { id, type, user: userName, orderRef: order.soa_no, customerName, detail, timestamp: now, readAt: null };
+  return { id, type, event, user: userName, orderRef: order.soa_no, customerName, detail, timestamp: now, readAt: null };
 }
 
 // Helper to batch-load order items (and payments)
@@ -421,8 +422,8 @@ export async function createOrder(req, res) {
     await conn.query(
       `INSERT INTO notifications (
         id, user_id, user_name, order_id, order_ref, customer_id, customer_name,
-        notification_type, message, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'new_order', ?, ?)`,
+        notification_type, event, message, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'new_order', 'order.create', ?, ?)`,
       [
         notifId,
         userId,
@@ -462,6 +463,7 @@ export async function createOrder(req, res) {
     const createdNotif = {
       id: notifId,
       type: "new_order",
+      event: "order.create",
       user: userName,
       orderRef: soaNo,
       customerName: customerName.trim(),
@@ -623,8 +625,8 @@ export async function updateOrderDocuments(req, res) {
       await conn.query(
         `INSERT INTO notifications (
           id, user_id, user_name, order_id, order_ref, customer_id, customer_name,
-          notification_type, message, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'detail_update', ?, ?)`,
+          notification_type, event, message, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'detail_update', 'order.documents_update', ?, ?)`,
         [notifId, userId, userName, id, order.soa_no, order.customer_id, order.customerName, detail, now]
       );
 
@@ -643,6 +645,7 @@ export async function updateOrderDocuments(req, res) {
       createdNotif = {
         id: notifId,
         type: "detail_update",
+        event: "order.documents_update",
         user: userName,
         orderRef: order.soa_no,
         customerName: order.customerName,
@@ -830,9 +833,10 @@ export async function updateItemProduction(req, res) {
       await conn.query(
         `INSERT INTO notifications (
           id, user_id, user_name, order_id, order_ref, customer_id, customer_name,
-          notification_type, message, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, (SELECT full_name FROM customers WHERE id = ?), 'status_update', ?, NOW())`,
-        [notifId, userId, userName, id, order.soa_no, order.customer_id, order.customer_id, detail]
+          notification_type, event, message, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, (SELECT full_name FROM customers WHERE id = ?), 'status_update', ?, ?, NOW())`,
+        // event is the new status: order.pending / order.in_production / order.ready / order.completed
+        [notifId, userId, userName, id, order.soa_no, order.customer_id, order.customer_id, `order.${derivedStatus}`, detail]
       );
     }
 
@@ -934,6 +938,7 @@ export async function recordPayment(req, res) {
       order,
       customerName: order.customerName,
       type: "detail_update",
+      event: fields.paymentType === "payment" ? "payment.record" : `payment.${fields.paymentType}`,
       detail,
     });
 
@@ -1016,6 +1021,7 @@ export async function voidPayment(req, res) {
       order,
       customerName: order.customerName,
       type: "detail_update",
+      event: "payment.void",
       detail,
     });
 
@@ -1098,6 +1104,7 @@ export async function cancelOrder(req, res) {
       order,
       customerName: order.customerName,
       type: "status_update",
+      event: "order.cancel",
       detail,
     });
 

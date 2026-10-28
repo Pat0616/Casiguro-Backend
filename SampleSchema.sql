@@ -350,6 +350,7 @@ CREATE TABLE IF NOT EXISTS notifications (
   customer_name VARCHAR(150),
 
   notification_type VARCHAR(50) NOT NULL,
+  event VARCHAR(60) NULL,                 -- exact action for the icon, e.g. payment.void, order.ready (NULL = use the type)
   message TEXT NOT NULL,
 
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,

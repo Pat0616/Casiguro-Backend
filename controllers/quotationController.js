@@ -851,8 +851,8 @@ export async function acceptAndConvertToOrder(req, res) {
     await conn.query(
       `INSERT INTO notifications (
         id, user_id, user_name, order_id, order_ref, customer_id, customer_name,
-        notification_type, message, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'new_order', ?, ?)`,
+        notification_type, event, message, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'new_order', 'order.create_from_quotation', ?, ?)`,
       [
         notifId,
         userId,
@@ -902,6 +902,7 @@ export async function acceptAndConvertToOrder(req, res) {
     const createdNotif = {
       id: notifId,
       type: "new_order",
+      event: "order.create_from_quotation",
       user: userName,
       orderRef: soaNo,
       customerName: quote.customer_name,
