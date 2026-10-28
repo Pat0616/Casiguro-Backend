@@ -3,6 +3,8 @@
 -- Enterprise Transaction Platform (Catalog -> Quotations -> Orders -> Production)
 -- Database: casigurotest (or your_database)
 -- Character Set: utf8mb4 / utf8mb4_unicode_ci
+-- Setup: run `npm run db:setup` (creates the database named DB_NAME in .env and applies this file).
+--        Importing this file by hand creates `casigurotest`. Safe to re-run; nothing is dropped except the triggers.
 -- ========================================================
 
 CREATE DATABASE IF NOT EXISTS casigurotest
@@ -514,7 +516,10 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   INDEX idx_audit_logs_category (category)
 ) ENGINE=InnoDB;
 
+-- Dropped and recreated so this file can be run again on an existing database
+DROP TRIGGER IF EXISTS trg_audit_logs_no_update;
 CREATE TRIGGER trg_audit_logs_no_update BEFORE UPDATE ON audit_logs FOR EACH ROW
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'audit_logs is append-only';
+DROP TRIGGER IF EXISTS trg_audit_logs_no_delete;
 CREATE TRIGGER trg_audit_logs_no_delete BEFORE DELETE ON audit_logs FOR EACH ROW
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'audit_logs is append-only';

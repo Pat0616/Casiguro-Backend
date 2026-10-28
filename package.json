@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "nodemon server.js",
+    "db:setup": "node scripts/setup_database.js",
+    "create-admin": "node scripts/create_admin.js",
     "migrate:catalog-images": "node scripts/migrate_catalog_images.js",
     "migrate:catalog-variants": "node scripts/migrate_catalog_variants.js",
     "migrate:soa-numbers": "node scripts/migrate_soa_numbers.js",

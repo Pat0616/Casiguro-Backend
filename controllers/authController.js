@@ -7,9 +7,7 @@ import { generateToken } from "../utils/generateToken.js";
 import { logAudit, logAuditSafely } from "../utils/auditLog.js";
 import { emitAccountChanged } from "../websocket/socket.js";
 import { sendVerificationCode } from "../utils/mailer.js";
-
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const CONTACT_PATTERN = /^\+?[\d\s()-]{7,20}$/;
+import { parseRegistration } from "../utils/accountFields.js";
 
 const BLOCKED_LOGIN_MESSAGES = {
   pending: "Your account is awaiting admin approval. You can sign in once an administrator approves it.",
@@ -25,21 +23,6 @@ const CODE_TTL_MINUTES = 10;
 const RESEND_COOLDOWN_SECONDS = 60;
 const MAX_CODE_ATTEMPTS = 5;
 const MAX_CODES_PER_HOUR = 5;
-
-function parseRegistration(body = {}) {
-  const full_name = String(body.full_name || "").trim();
-  const email = String(body.email || "").trim().toLowerCase();
-  const contact_number = String(body.contact_number || "").trim();
-  const password = String(body.password || "");
-
-  if (full_name.length < 2 || full_name.length > 150) return { error: "Enter your full name." };
-  if (!EMAIL_PATTERN.test(email) || email.length > 150) return { error: "Enter a valid email address." };
-  if (!CONTACT_PATTERN.test(contact_number)) return { error: "Enter a valid contact number." };
-  if (password.length < 8 || !/[A-Za-z]/.test(password) || !/\d/.test(password)) {
-    return { error: "Password must be at least 8 characters and include a letter and a number." };
-  }
-  return { fields: { full_name, email, contact_number, password } };
-}
 
 // "2026-10-22 23:15:00" → "10/22/2026"
 const toDocDate = (value) => {
