@@ -9,6 +9,7 @@ import orderRouter from "./routes/orderRoutes.js";
 import notificationRouter from "./routes/notificationRoutes.js";
 import customerRouter from "./routes/customerRoutes.js";
 import catalogRouter from "./routes/catalogRoutes.js";
+import categoryRouter from "./routes/categoryRoutes.js";
 import quotationRouter from "./routes/quotationRoutes.js";
 import accountRouter from "./routes/accountRoutes.js";
 import reportRouter from "./routes/reportRoutes.js";
@@ -35,6 +36,7 @@ app.use(
 
 app.use("/api/auth", authRouter);
 app.use("/api/catalog", catalogRouter);
+app.use("/api/categories", categoryRouter);
 app.use("/api/quotations", quotationRouter);
 app.use("/api/orders", orderRouter);
 app.use("/api/notifications", notificationRouter);

@@ -225,16 +225,12 @@ export async function createOrder(req, res) {
       );
     }
 
-    // 2. Resolve Category
+    // 2. Resolve Category (by name; an unknown name means no category, shown as "General").
+    // Categories are only created in the Catalog page's Categories section.
     let categoryId = null;
-    if (category) {
+    if (typeof category === "string" && category.trim()) {
       const [catRows] = await conn.query("SELECT id FROM categories WHERE name = ?", [category.trim()]);
-      if (catRows.length > 0) {
-        categoryId = catRows[0].id;
-      } else {
-        categoryId = crypto.randomUUID();
-        await conn.query("INSERT INTO categories (id, name) VALUES (?, ?)", [categoryId, category.trim()]);
-      }
+      if (catRows.length > 0) categoryId = catRows[0].id;
     }
 
     // 3. Generate SOA Number

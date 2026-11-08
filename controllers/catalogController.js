@@ -41,30 +41,16 @@ function validateVariants(value) {
   return { valid: true, variants };
 }
 
-const MAX_CATEGORY_NAME = 100; // categories.name VARCHAR(100)
+const CATEGORY_NOT_FOUND = "That category no longer exists. Pick another one, or create it in the Categories section.";
 
-function categoryNameError(categoryValue) {
-  if (typeof categoryValue === "string" && categoryValue.trim().length > MAX_CATEGORY_NAME) {
-    return `Category name must be ${MAX_CATEGORY_NAME} characters or fewer`;
-  }
-  return null;
-}
-
-// Accepts an existing category id or a name. A name that doesn't exist yet becomes a new category
-// (matching is case-insensitive via the column collation, so "apparel" reuses "Apparel").
+// Accepts an existing category id; blank/null means no category (shown as "General").
+// Categories are only created in the Categories section (categoryController), never here.
+// Returns { id } or { error }.
 async function resolveCategoryId(categoryValue) {
-  if (typeof categoryValue !== "string" || !categoryValue.trim()) return null;
-  const value = categoryValue.trim();
-
-  const [categoryById] = await pool.query("SELECT id FROM categories WHERE id = ?", [value]);
-  if (categoryById.length > 0) return categoryById[0].id;
-
-  const [categoryByName] = await pool.query("SELECT id FROM categories WHERE name = ?", [value]);
-  if (categoryByName.length > 0) return categoryByName[0].id;
-
-  const categoryId = crypto.randomUUID();
-  await pool.query("INSERT INTO categories (id, name) VALUES (?, ?)", [categoryId, value]);
-  return categoryId;
+  if (categoryValue == null || (typeof categoryValue === "string" && !categoryValue.trim())) return { id: null };
+  if (typeof categoryValue !== "string") return { error: CATEGORY_NOT_FOUND };
+  const [rows] = await pool.query("SELECT id FROM categories WHERE id = ?", [categoryValue.trim()]);
+  return rows.length > 0 ? { id: rows[0].id } : { error: CATEGORY_NOT_FOUND };
 }
 
 // GET /api/catalog
@@ -149,15 +135,14 @@ export async function createCatalogItem(req, res) {
       return res.status(400).json({ message: "Each option must have a unique name and a valid non-negative price." });
     }
 
-    const categoryError = categoryNameError(categoryId);
-    if (categoryError) {
-      return res.status(400).json({ message: categoryError });
+    const category = await resolveCategoryId(categoryId);
+    if (category.error) {
+      return res.status(400).json({ message: category.error });
     }
+    const finalCategoryId = category.id;
 
     const price = Math.max(0, Number(basePrice) || 0);
     const id = crypto.randomUUID();
-
-    const finalCategoryId = await resolveCategoryId(categoryId);
 
     await pool.query(
       `INSERT INTO products (
@@ -235,9 +220,9 @@ export async function updateCatalogItem(req, res) {
       return res.status(404).json({ message: "Catalog item not found" });
     }
 
-    const categoryError = categoryNameError(categoryId);
-    if (categoryError) {
-      return res.status(400).json({ message: categoryError });
+    const category = categoryId !== undefined ? await resolveCategoryId(categoryId) : null;
+    if (category?.error) {
+      return res.status(400).json({ message: category.error });
     }
 
     const current = existing[0];
@@ -254,9 +239,7 @@ export async function updateCatalogItem(req, res) {
     const newImageUrl = imageUrl !== undefined ? imageUrl : current.image_url;
     const newStock = isStockItem !== undefined ? Boolean(isStockItem) : Boolean(current.is_stock_item);
     const newActive = isActive !== undefined ? Boolean(isActive) : Boolean(current.is_active);
-    const newCatId = categoryId !== undefined
-      ? await resolveCategoryId(categoryId)
-      : current.category_id;
+    const newCatId = category ? category.id : current.category_id;
 
     await pool.query(
       `UPDATE products SET
