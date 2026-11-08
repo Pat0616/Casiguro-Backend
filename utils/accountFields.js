@@ -1,8 +1,15 @@
 // backend/utils/accountFields.js
-// Account field rules shared by self-registration (authController) and the create-admin script.
+// Account field rules shared by self-registration, password change/reset (authController) and the create-admin script.
 
 export const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export const CONTACT_PATTERN = /^\+?[\d\s()-]{7,20}$/;
+export const PASSWORD_ERROR = "Password must be at least 8 characters and include a letter and a number.";
+
+// Used for registration, change password and reset. Returns an error message or null.
+export function validatePassword(password) {
+  if (password.length < 8 || !/[A-Za-z]/.test(password) || !/\d/.test(password)) return PASSWORD_ERROR;
+  return null;
+}
 
 export function parseRegistration(body = {}) {
   const full_name = String(body.full_name || "").trim();
@@ -13,8 +20,7 @@ export function parseRegistration(body = {}) {
   if (full_name.length < 2 || full_name.length > 150) return { error: "Enter your full name." };
   if (!EMAIL_PATTERN.test(email) || email.length > 150) return { error: "Enter a valid email address." };
   if (!CONTACT_PATTERN.test(contact_number)) return { error: "Enter a valid contact number." };
-  if (password.length < 8 || !/[A-Za-z]/.test(password) || !/\d/.test(password)) {
-    return { error: "Password must be at least 8 characters and include a letter and a number." };
-  }
+  const passwordError = validatePassword(password);
+  if (passwordError) return { error: passwordError };
   return { fields: { full_name, email, contact_number, password } };
 }

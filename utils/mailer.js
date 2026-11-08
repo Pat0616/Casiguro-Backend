@@ -43,10 +43,59 @@ export async function sendVerificationCode(to, name, code, expiresInMinutes) {
   await sendMail({ to, subject, text, html, consoleNote: `Verification code for ${to}: ${code}` });
 }
 
-// Tells an admin their account was deactivated, so a wrongful lock-out doesn't go unnoticed
-export async function sendAccountDeactivatedEmail(to, name, { byName, reason, at = new Date() }) {
+export async function sendPasswordResetCode(to, name, code, expiresInMinutes) {
   const firstName = String(name).trim().split(/\s+/)[0] || "there";
-  const when = at.toLocaleString("en-US", {
+  const subject = `${code} is your Casiguro password reset code`;
+  const text =
+    `Hi ${firstName},\n\n` +
+    `Your password reset code is ${code}. It expires in ${expiresInMinutes} minutes.\n\n` +
+    `Enter it on the Forgot Password page to choose a new password.\n` +
+    `If you didn't ask to reset your password, you can ignore this email; your password stays the same.\n\n` +
+    `Casiguro Enterprises Inc. — Transaction Management System`;
+  const html = `
+    <div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:0 auto;color:#0f172a">
+      <div style="height:6px;background:linear-gradient(90deg,#0ea5e9,#db2777,#facc15)"></div>
+      <h2 style="color:#1e3a8a;margin:24px 0 8px">Reset your password</h2>
+      <p>Hi ${escapeHtml(firstName)},</p>
+      <p>Use this code to choose a new password for the Casiguro Transaction Management System:</p>
+      <p style="font-size:32px;font-weight:bold;letter-spacing:8px;background:#f1f5f9;border-radius:12px;padding:16px;text-align:center;margin:24px 0">${code}</p>
+      <p>It expires in <strong>${expiresInMinutes} minutes</strong>.</p>
+      <p style="color:#64748b;font-size:13px">If you didn't ask to reset your password, you can ignore this email; your password stays the same.</p>
+      <p style="color:#94a3b8;font-size:12px;margin-top:32px">Casiguro Enterprises Inc.</p>
+    </div>`;
+
+  await sendMail({ to, subject, text, html, consoleNote: `Password reset code for ${to}: ${code}` });
+}
+
+// Confirms a password change or reset, so someone who didn't do it finds out
+export async function sendPasswordChangedEmail(to, name, { via, at = new Date() }) {
+  const firstName = String(name).trim().split(/\s+/)[0] || "there";
+  const when = manilaTime(at);
+  const how = via === "reset" ? "reset with a code sent to this email" : "changed from inside the system";
+  const subject = "Your Casiguro password was changed";
+  const text =
+    `Hi ${firstName},\n\n` +
+    `The password for your Casiguro Transaction Management System account was ${how} on ${when} (Manila time). ` +
+    `Other devices that were signed in have been signed out.\n\n` +
+    `If this wasn't you, reset your password with "Forgot Password?" on the sign-in page and tell an administrator.\n\n` +
+    `Casiguro Enterprises Inc. — Transaction Management System`;
+  const html = `
+    <div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:0 auto;color:#0f172a">
+      <div style="height:6px;background:linear-gradient(90deg,#0ea5e9,#db2777,#facc15)"></div>
+      <h2 style="color:#1e3a8a;margin:24px 0 8px">Your password was changed</h2>
+      <p>Hi ${escapeHtml(firstName)},</p>
+      <p>The password for your Casiguro Transaction Management System account was ${how} on
+        <strong>${escapeHtml(when)}</strong> (Manila time). Other devices that were signed in have been signed out.</p>
+      <p style="background:#f1f5f9;border-radius:12px;padding:12px 16px;margin:20px 0">If this wasn't you, reset your password with
+        <strong>Forgot Password?</strong> on the sign-in page and tell an administrator.</p>
+      <p style="color:#94a3b8;font-size:12px;margin-top:32px">Casiguro Enterprises Inc.</p>
+    </div>`;
+
+  await sendMail({ to, subject, text, html, consoleNote: `Password ${via} notice for ${to}` });
+}
+
+const manilaTime = (at) =>
+  at.toLocaleString("en-US", {
     timeZone: "Asia/Manila",
     month: "2-digit",
     day: "2-digit",
@@ -54,6 +103,11 @@ export async function sendAccountDeactivatedEmail(to, name, { byName, reason, at
     hour: "numeric",
     minute: "2-digit",
   });
+
+// Tells an admin their account was deactivated, so a wrongful lock-out doesn't go unnoticed
+export async function sendAccountDeactivatedEmail(to, name, { byName, reason, at = new Date() }) {
+  const firstName = String(name).trim().split(/\s+/)[0] || "there";
+  const when = manilaTime(at);
   const subject = "Your Casiguro admin account was deactivated";
   const text =
     `Hi ${firstName},\n\n` +

@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS users (
   status_changed_at TIMESTAMP NULL,
   status_reason TEXT NULL,                          -- rejection / deactivation reason
   last_login_at TIMESTAMP NULL,
+  password_changed_at TIMESTAMP NULL,               -- sessions (JWTs) issued before this are rejected
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
@@ -50,6 +51,23 @@ CREATE TABLE IF NOT EXISTS email_verifications (
   window_started_at DATETIME NOT NULL,
   last_sent_at DATETIME NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+-- Forgot-password code for an active account (one per user). Deleted once the password is reset or changed.
+CREATE TABLE IF NOT EXISTS password_resets (
+  user_id CHAR(36) PRIMARY KEY,
+  code_hash CHAR(64) NOT NULL,                      -- SHA-256 of code + JWT_SECRET; the code itself is never stored
+  expires_at DATETIME NOT NULL,
+  attempts INT NOT NULL DEFAULT 0,                  -- wrong codes entered for the current code
+  send_count INT NOT NULL DEFAULT 1,                -- codes sent in the current hour window
+  window_started_at DATETIME NOT NULL,
+  last_sent_at DATETIME NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  CONSTRAINT fk_password_resets_user
+    FOREIGN KEY (user_id)
+    REFERENCES users(id)
+    ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 -- ========================================================

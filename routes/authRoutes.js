@@ -7,6 +7,9 @@ import {
   login,
   logout,
   getMe,
+  changePassword,
+  startPasswordReset,
+  resetPassword,
 } from "../controllers/authController.js";
 
 
@@ -19,4 +22,8 @@ authRouter.post("/register/resend", resendRegistrationCode);
 authRouter.post("/login", login);
 authRouter.post("/logout", logout);
 authRouter.get("/me", protect, getMe);
+// Passwords: change your own while signed in, or reset a forgotten one with an emailed code (start also resends)
+authRouter.post("/change-password", protect, changePassword);
+authRouter.post("/forgot-password/start", startPasswordReset);
+authRouter.post("/forgot-password/reset", resetPassword);
 export default authRouter;

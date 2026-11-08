@@ -11,7 +11,7 @@ export async function protect(req, res, next) {
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || "default_jwt_secret_casiguro_2026");
     const [rows] = await pool.query(
-      "SELECT id, full_name, email, role, status FROM users WHERE id = ?",
+      "SELECT id, full_name, email, role, status, UNIX_TIMESTAMP(password_changed_at) AS pw_changed FROM users WHERE id = ?",
       [decoded.id]
     );
 
@@ -25,7 +25,14 @@ export async function protect(req, res, next) {
       return res.status(401).json({ message: "This account is no longer active. Please contact an administrator." });
     }
 
-    req.user = rows[0];
+    // A password change or reset signs out every session that started before it
+    const { pw_changed, ...user } = rows[0];
+    if (pw_changed && decoded.iat < Number(pw_changed)) {
+      res.clearCookie("token");
+      return res.status(401).json({ message: "Your password was changed. Please sign in again." });
+    }
+
+    req.user = user;
     next();
   } catch (err) {
     console.error("Auth middleware error:", err.message);

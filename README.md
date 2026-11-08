@@ -4,7 +4,7 @@ REST API and real-time server for the Casiguro Enterprises Transaction Managemen
 products-and-services business from quotation to a paid, completed order.
 
 **Stack:** Node.js · Express 5 · MySQL / MariaDB (`mysql2`) · Socket.IO · JWT cookie auth · Puppeteer (quotation PDFs) ·
-ExcelJS (sales export) · Nodemailer (sign-up verification codes)
+ExcelJS (sales export) · Nodemailer (sign-up and password reset codes)
 
 The frontend lives in its own repository, [`casiguro-app`](../casiguro-app).
 
@@ -50,7 +50,7 @@ All of them are listed with explanations in [`.env.sample`](.env.sample):
 | `PORT` | API port (default 5000) |
 | `JWT_SECRET` | Signs login tokens. A long random value, different for every environment |
 | `CLIENT_ORIGIN` | Frontend URL allowed by CORS and Socket.IO (default `http://localhost:5173`) |
-| `MAIL_USER`, `MAIL_APP_PASSWORD`, `MAIL_FROM_NAME` | Gmail + App Password for sign-up codes. If empty, codes are printed to the console |
+| `MAIL_USER`, `MAIL_APP_PASSWORD`, `MAIL_FROM_NAME` | Gmail + App Password for sign-up and password reset codes. If empty, codes are printed to the console |
 
 ## Project layout
 
@@ -59,7 +59,7 @@ server.js            Express app, route mounting, Socket.IO start-up
 database/db.js       MySQL connection pool (dateStrings: true)
 routes/              URL → controller wiring, one file per area
 controllers/         Request handlers (orders, quotations, catalog, accounts, auth, reports, …)
-middleware/          protect (JWT + active-account check), requireAdmin
+middleware/          protect (JWT + active-account + password-changed check), requireAdmin
 utils/               Shared logic: SOA numbers & document fields, payments, audit log, account rules,
                      PDF renderer, sales workbook, mailer
 templates/           Quotation PDF HTML template
@@ -79,6 +79,9 @@ API routes are mounted under `/api`: `auth`, `catalog`, `quotations`, `orders`, 
   payment status are always recalculated from the payment log.
 - **Quotation PDF logo.** The logo is read from the sibling frontend repo
   (`../casiguro-app/public/CasiguroEnterpriseLogo.png`). If it's missing, the company name prints as text instead.
+- **Passwords.** Users change their own password from the sidebar, or reset a forgotten one with an emailed code
+  (`/forgot-password`). Either one signs out the account's other sessions. Admins can't set anyone's password.
+  Databases created before this need `npm run migrate:password-reset`.
 - **Backups.** Before a migration, dump the database (e.g. with `mysqldump`) into `backups/`, which is git-ignored.
 
 ## Deploying
