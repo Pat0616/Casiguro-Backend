@@ -413,7 +413,7 @@ export async function createOrder(req, res) {
 
     // 7. Insert Notification
     const notifId = crypto.randomUUID();
-    const notifDetail = `New ${isStock ? "Stock" : "Custom"} Order created — ${productNameSnapshot} (₱${totalPrice.toFixed(2)})${
+    const notifDetail = `New ${isStock ? "Stock" : "Custom"} Order created — ${productNameSnapshot} (${formatCurrency(totalPrice)})${
       paymentFields ? `. ${describePayment(paymentFields)}` : ""
     }`;
     const now = new Date();

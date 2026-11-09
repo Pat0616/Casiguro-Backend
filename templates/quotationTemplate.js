@@ -122,8 +122,8 @@ export function renderQuotationHtml({ quotation, items, order }) {
       <td class="item">${escapeHtml(it.itemName)}</td>
       <td class="c">${escapeHtml(it.selectedVariant || "")}</td>
       <td class="c num">${escapeHtml(it.quantity)}</td>
-      <td class="r num">${formatUnitCost(it.finalUnitPrice)}</td>
-      <td class="r num">${formatMoney(it.subtotal)}</td>
+      <td class="r num">₱${formatUnitCost(it.finalUnitPrice)}</td>
+      <td class="r num">₱${formatMoney(it.subtotal)}</td>
     </tr>`;
   }).join("");
 

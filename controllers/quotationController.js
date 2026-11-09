@@ -300,9 +300,7 @@ export async function createQuotation(req, res) {
         if (!item.priceAdjustmentReason || !item.priceAdjustmentReason.trim()) {
           await conn.rollback();
           return res.status(400).json({
-            message: `A Price Adjustment Reason is strictly mandatory for item "${item.itemName}" because final price (₱${finalUnitPrice.toFixed(
-              2
-            )}) differs from catalog base price (₱${basePrice.toFixed(2)}).`,
+            message: `A Price Adjustment Reason is strictly mandatory for item "${item.itemName}" because final price (${peso(finalUnitPrice)}) differs from catalog base price (${peso(basePrice)}).`,
           });
         }
       }
@@ -513,9 +511,7 @@ export async function updateQuotation(req, res) {
         if (!item.priceAdjustmentReason || !item.priceAdjustmentReason.trim()) {
           await conn.rollback();
           return res.status(400).json({
-            message: `A Price Adjustment Reason is strictly mandatory for item "${item.itemName}" because final price (₱${finalUnitPrice.toFixed(
-              2
-            )}) differs from catalog base price (₱${basePrice.toFixed(2)}).`,
+            message: `A Price Adjustment Reason is strictly mandatory for item "${item.itemName}" because final price (${peso(finalUnitPrice)}) differs from catalog base price (${peso(basePrice)}).`,
           });
         }
       }
@@ -840,10 +836,7 @@ export async function acceptAndConvertToOrder(req, res) {
 
     // 8. Create Notification
     const notifId = crypto.randomUUID();
-    const notifDetail = `Quotation ${quote.quote_no} accepted and converted to Order SOA ${soaNo} (Total: ₱${totalAmount.toLocaleString(
-      "en-PH",
-      { minimumFractionDigits: 2 }
-    )})${paymentFields ? `. ${describePayment(paymentFields)}` : ""}`;
+    const notifDetail = `Quotation ${quote.quote_no} accepted and converted to Order SOA ${soaNo} (Total: ${peso(totalAmount)})${paymentFields ? `. ${describePayment(paymentFields)}` : ""}`;
     const now = new Date();
 
     await conn.query(
