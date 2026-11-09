@@ -2,7 +2,7 @@
 import pool from "../database/db.js";
 import crypto from "crypto";
 import { emitOrderCreated, emitOrderUpdated, emitNotification } from "../websocket/socket.js";
-import { DOCUMENT_COLUMNS, DOCUMENT_LABELS, generateSoaNumber, parseDocumentFields } from "../utils/orderDocuments.js";
+import { DOCUMENT_COLUMNS, DOCUMENT_LABELS, generateSoaNumber, isValidIsoDate, parseDocumentFields } from "../utils/orderDocuments.js";
 import { diffFields, logAudit } from "../utils/auditLog.js";
 import {
   attachPaymentsToOrders,
@@ -669,6 +669,104 @@ export async function updateOrderDocuments(req, res) {
     await conn.rollback();
     console.error("updateOrderDocuments error:", err);
     res.status(500).json({ message: "Failed to update order documents" });
+  } finally {
+    conn.release();
+  }
+}
+
+const DEADLINE_STATUSES = ["pending", "in_production", "ready"];
+const MAX_DEADLINE_REASON = 500;
+const toDocDate = (iso) => (iso ? `${iso.slice(5, 7)}/${iso.slice(8, 10)}/${iso.slice(0, 4)}` : "none"); // MM/DD/YYYY
+
+// PUT /api/orders/:id/due-date { dueDate: YYYY-MM-DD, reason }
+// Any employee may move the deadline of an open order (pending / in production / ready) to today or later.
+// Logged as a notification and an audit entry; the reason is required.
+export async function updateOrderDueDate(req, res) {
+  const conn = await pool.getConnection();
+  try {
+    const { id } = req.params;
+    const dueDate = typeof req.body?.dueDate === "string" ? req.body.dueDate.trim() : "";
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim().replace(/\s+/g, " ") : "";
+
+    if (!isValidIsoDate(dueDate)) return res.status(400).json({ message: "Choose a valid new deadline" });
+    if (!reason) return res.status(400).json({ message: "A reason for changing the deadline is required" });
+    if (reason.length > MAX_DEADLINE_REASON) {
+      return res.status(400).json({ message: `The reason must be ${MAX_DEADLINE_REASON} characters or fewer` });
+    }
+
+    await conn.beginTransaction();
+    const [orderRows] = await conn.query(
+      `SELECT o.id, o.soa_no, o.status, o.customer_id, o.date_ordered, o.due_date,
+        CURDATE() AS today, COALESCE(c.full_name, '') AS customerName
+      FROM orders o
+      LEFT JOIN customers c ON o.customer_id = c.id
+      WHERE o.id = ? FOR UPDATE`,
+      [id]
+    );
+    if (orderRows.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    const order = orderRows[0];
+    // dateStrings: true, so DATE columns and CURDATE() (Manila) arrive as YYYY-MM-DD and compare as strings
+    const reject = (status, message) => conn.rollback().then(() => res.status(status).json({ message }));
+    if (!DEADLINE_STATUSES.includes(order.status)) {
+      return reject(409, `The deadline of a ${order.status === "cancelled" ? "cancelled" : "completed"} order can't be changed`);
+    }
+    if (dueDate < order.today) return reject(400, "The new deadline can't be in the past");
+    if (order.date_ordered && dueDate < order.date_ordered) {
+      return reject(400, `The new deadline can't be before the order date (${toDocDate(order.date_ordered)})`);
+    }
+    if (dueDate === order.due_date) return reject(400, "That is already the deadline");
+
+    const userId = req.user?.id || null;
+    const userName = req.user?.full_name || "Staff";
+    await conn.query("UPDATE orders SET due_date = ?, updated_by = ? WHERE id = ?", [dueDate, userId, id]);
+
+    const later = !order.due_date || dueDate > order.due_date;
+    const detail = `Deadline for SOA ${order.soa_no} ${later ? "moved to" : "moved up to"} ${toDocDate(dueDate)} `
+      + `(was ${toDocDate(order.due_date)}). Reason: ${reason}`;
+    const notifId = crypto.randomUUID();
+    const now = new Date();
+    await conn.query(
+      `INSERT INTO notifications (
+        id, user_id, user_name, order_id, order_ref, customer_id, customer_name,
+        notification_type, event, message, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'detail_update', 'order.deadline_change', ?, ?)`,
+      [notifId, userId, userName, id, order.soa_no, order.customer_id, order.customerName, detail, now]
+    );
+    await logAudit(conn, req, {
+      action: "order.deadline_change",
+      category: "order",
+      entityType: "order",
+      entityId: id,
+      entityLabel: `SOA ${order.soa_no}`,
+      description: detail,
+      changes: { "Due date": { from: order.due_date, to: dueDate } },
+    });
+
+    await conn.commit();
+
+    const fullOrder = await loadFullOrder(id);
+    emitOrderUpdated(fullOrder);
+    emitNotification({
+      id: notifId,
+      type: "detail_update",
+      event: "order.deadline_change",
+      user: userName,
+      orderRef: order.soa_no,
+      customerName: order.customerName,
+      detail,
+      timestamp: now,
+      readAt: null,
+    });
+
+    res.json(fullOrder);
+  } catch (err) {
+    await conn.rollback().catch(() => {});
+    console.error("updateOrderDueDate error:", err);
+    res.status(500).json({ message: "Failed to change the deadline" });
   } finally {
     conn.release();
   }
