@@ -7,6 +7,7 @@ import {
   updateOrder,
   updateOrderDocuments,
   updateOrderDueDate,
+  updateOrderItems,
   updateItemProduction,
   getOrderPayments,
   recordPayment,
@@ -25,6 +26,7 @@ orderRouter.post("/", createOrder);
 orderRouter.put("/:id", updateOrder);
 orderRouter.put("/:id/documents", updateOrderDocuments);
 orderRouter.put("/:id/due-date", updateOrderDueDate);
+orderRouter.put("/:id/items", updateOrderItems); // any employee, open orders only, reason required
 orderRouter.put("/:id/production", updateItemProduction);
 orderRouter.get("/:id/payments", getOrderPayments);
 orderRouter.post("/:id/payments", recordPayment);

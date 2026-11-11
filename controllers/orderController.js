@@ -11,6 +11,7 @@ import {
   parsePaymentInput,
   recalcOrderPayments,
 } from "../utils/payments.js";
+import { isPriceAdjusted, itemLabel } from "../utils/pricing.js";
 
 export const ORDER_SELECT = `
   SELECT
@@ -772,6 +773,324 @@ export async function updateOrderDueDate(req, res) {
   }
 }
 
+// Per-item progress from its quantities (order_items.production_progress / production_status)
+function itemProgress(quantity, quantityCompleted) {
+  const progress = quantity > 0 ? Math.min(100, Math.round((quantityCompleted / quantity) * 100)) : 0;
+  const status = progress >= 100 ? "completed" : progress > 0 ? "in_production" : "pending";
+  return { progress, status };
+}
+
+// Order production totals and status from its items (DB rows): quantity-weighted progress.
+// Fully produced → "ready" while money is still owed, otherwise "completed".
+function deriveOrderProgress(items, balance, allowIncompletePaymentCompletion = false) {
+  const totalQty = items.reduce((sum, it) => sum + Number(it.quantity), 0);
+  const totalCompleted = items.reduce((sum, it) => sum + Number(it.quantity_completed), 0);
+  const overallProgress = totalQty > 0 ? Math.min(100, Math.round((totalCompleted / totalQty) * 100)) : 0;
+  let status = "pending";
+  if (overallProgress >= 100) status = balance > 0 && !allowIncompletePaymentCompletion ? "ready" : "completed";
+  else if (overallProgress > 0) status = "in_production";
+  return { totalQty, totalCompleted, overallProgress, status };
+}
+
+const toCents = (n) => Math.round(Number(n) * 100);
+const isMoney = (n) => Number.isFinite(n) && n >= 0 && Math.abs(n * 100 - Math.round(n * 100)) < 1e-6;
+const cleanText = (value, max) => (typeof value === "string" ? value.trim().replace(/\s+/g, " ").slice(0, max) : "");
+
+// PUT /api/orders/:id/items
+// { reason, expectedTotal, items: [...], removedItemIds: [...] }
+// Revises an open order's lines (customer adds something, quantity or price changes). Any employee; reason required.
+// Existing lines (with id) may change quantity / unit price; lines without id are added; removedItemIds are deleted.
+// Each existing line carries `previous` {quantity, finalUnitPrice, quantityCompleted}: if the DB differs, 409.
+// The total is recomputed, payments re-derived, and production status re-derived from the items.
+export async function updateOrderItems(req, res) {
+  const conn = await pool.getConnection();
+  try {
+    const { id } = req.params;
+    const body = req.body || {};
+    const reason = cleanText(body.reason, 1000);
+    const requested = Array.isArray(body.items) ? body.items : null;
+    const removedIds = Array.isArray(body.removedItemIds) ? body.removedItemIds.filter((v) => typeof v === "string") : [];
+
+    if (!reason) return res.status(400).json({ message: "A reason for changing the items is required" });
+    if (reason.length > 500) return res.status(400).json({ message: "The reason must be 500 characters or fewer" });
+    if (!requested) return res.status(400).json({ message: "Items are required" });
+    if (requested.length === 0) return res.status(400).json({ message: "An order needs at least one item" });
+
+    await conn.beginTransaction();
+    const reject = (status, message, extra = {}) => conn.rollback().then(() => res.status(status).json({ message, ...extra }));
+
+    const order = await lockOrder(conn, id);
+    if (!order) return reject(404, "Order not found");
+    if (!DEADLINE_STATUSES.includes(order.status)) {
+      return reject(409, `The items of a ${order.status === "cancelled" ? "cancelled" : "completed"} order can't be changed`);
+    }
+    if (body.expectedTotal != null && toCents(body.expectedTotal) !== toCents(order.total_price)) {
+      return reject(409, `SOA ${order.soa_no} was changed by someone else (total is now ${formatCurrency(order.total_price)}). Your changes were not saved.`, { conflict: true });
+    }
+
+    const [dbItems] = await conn.query("SELECT * FROM order_items WHERE order_id = ? FOR UPDATE", [id]);
+    const dbById = new Map(dbItems.map((it) => [it.id, it]));
+    const conflict = (message) => reject(409, `${message} Your changes were not saved.`, { conflict: true });
+
+    // Every current line must be either kept (in items) or removed; anything else was added by someone else
+    const keptIds = new Set(requested.filter((it) => it.id).map((it) => it.id));
+    for (const it of dbItems) {
+      if (!keptIds.has(it.id) && !removedIds.includes(it.id)) {
+        return conflict(`${itemLabel(it.item_name_snapshot, it.variant_snapshot)} was added to this order by someone else.`);
+      }
+    }
+
+    const changes = {};
+    const summary = [];
+    const updates = [];
+    const inserts = [];
+
+    // Removed lines: only if nothing was produced yet
+    for (const removedId of removedIds) {
+      const row = dbById.get(removedId);
+      if (!row) return conflict("An item you removed is no longer on this order.");
+      if (keptIds.has(removedId)) return reject(400, "An item can't be both kept and removed");
+      const label = itemLabel(row.item_name_snapshot, row.variant_snapshot);
+      if (Number(row.quantity_completed) > 0) {
+        return reject(400, `${label} can't be removed: ${row.quantity_completed} already produced. Lower its quantity instead.`);
+      }
+      changes[`Removed ${label}`] = { from: `${row.quantity} × ${formatCurrency(row.final_unit_price)}`, to: "—" };
+      summary.push(`removed ${label}`);
+    }
+
+    const keptRows = [];
+    for (const [index, it] of requested.entries()) {
+      const quantity = Number(it.quantity);
+      const price = Number(it.finalUnitPrice);
+      const position = `Item #${index + 1}`;
+      if (!Number.isInteger(quantity) || quantity < 1) return reject(400, `${position}: quantity must be a whole number of at least 1`);
+      if (quantity > 1000000) return reject(400, `${position}: quantity is too large`);
+      if (!isMoney(price) || price > 99999999) return reject(400, `${position}: enter a valid unit price`);
+      const priceReasonInput = cleanText(it.priceAdjustmentReason, 500);
+
+      if (it.id) {
+        // Existing line: quantity, unit price and price reason may change
+        const row = dbById.get(it.id);
+        if (!row) return conflict("An item you edited was removed from this order by someone else.");
+        const label = itemLabel(row.item_name_snapshot, row.variant_snapshot);
+        const prev = it.previous || {};
+        if (
+          (prev.quantity != null && Number(prev.quantity) !== Number(row.quantity)) ||
+          (prev.finalUnitPrice != null && toCents(prev.finalUnitPrice) !== toCents(row.final_unit_price)) ||
+          (prev.quantityCompleted != null && Number(prev.quantityCompleted) !== Number(row.quantity_completed))
+        ) {
+          return conflict(`${label} was changed by someone else (now ${row.quantity_completed}/${row.quantity} at ${formatCurrency(row.final_unit_price)}).`);
+        }
+        const completed = Number(row.quantity_completed);
+        if (quantity < completed) {
+          return reject(400, `${label}: quantity can't be lower than the ${completed} already produced`);
+        }
+        const basePrice = Number(row.base_price);
+        const adjusted = isPriceAdjusted({ productServiceId: row.product_service_id, isCustom: Boolean(row.is_custom) }, basePrice, price);
+        const priceReason = adjusted ? priceReasonInput || cleanText(row.price_adjustment_reason, 500) : "";
+        if (adjusted && !priceReason) {
+          return reject(400, `Add a price adjustment reason for ${label}: ${formatCurrency(price)} differs from the catalog price ${formatCurrency(basePrice)}`);
+        }
+
+        const oldQty = Number(row.quantity);
+        const oldPrice = Number(row.final_unit_price);
+        const qtyChanged = oldQty !== quantity;
+        const priceChanged = toCents(oldPrice) !== toCents(price);
+        const reasonChanged = (row.price_adjustment_reason || "") !== (priceReason || "");
+        if (qtyChanged) changes[`${label} quantity`] = { from: oldQty, to: quantity };
+        if (priceChanged) changes[`${label} unit price`] = { from: formatCurrency(oldPrice), to: formatCurrency(price) };
+        if (qtyChanged || priceChanged) {
+          summary.push(`${label} ${[qtyChanged && `qty ${oldQty} → ${quantity}`, priceChanged && `price ${formatCurrency(oldPrice)} → ${formatCurrency(price)}`].filter(Boolean).join(", ")}`);
+        }
+        const { progress, status } = itemProgress(quantity, completed);
+        const subtotal = toCents(quantity * price) / 100;
+        if (qtyChanged || priceChanged || reasonChanged) {
+          updates.push({ id: row.id, quantity, price, priceReason: priceReason || null, subtotal, progress, status });
+        }
+        keptRows.push({ ...row, quantity, final_unit_price: price, subtotal, item_name_snapshot: row.item_name_snapshot });
+      } else {
+        // New line: catalog item (price checked against the catalog) or custom line
+        const isCustom = Boolean(it.isCustom) || !it.productServiceId;
+        const variant = cleanText(it.selectedVariant, 150) || null;
+        let itemName = cleanText(it.itemName, 150);
+        let basePrice = price;
+        let category = cleanText(it.category, 100) || "General";
+        let itemType = it.itemType === "service" ? "service" : "product";
+        let productServiceId = null;
+
+        if (!isCustom) {
+          const [products] = await conn.query(
+            `SELECT p.id, p.name, p.type, p.base_price, p.variants, COALESCE(c.name, 'General') AS categoryName
+            FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.id = ?`,
+            [it.productServiceId]
+          );
+          const product = products[0];
+          if (!product) return reject(400, `${position}: that catalog item no longer exists. Add it as a custom line instead.`);
+          productServiceId = product.id;
+          itemName = product.name; // catalog lines carry the catalog name (the form has no rename for them)
+          itemType = product.type;
+          category = product.categoryName;
+          basePrice = Number(product.base_price);
+          if (variant) {
+            const variants = typeof product.variants === "string" ? JSON.parse(product.variants || "[]") : product.variants || [];
+            const match = Array.isArray(variants) ? variants.find((v) => String(v.name) === variant) : null;
+            if (!match) return reject(400, `${position}: option "${variant}" is no longer offered for ${product.name}`);
+            basePrice = Number(match.price);
+          }
+        }
+        if (!itemName) return reject(400, `${position}: enter an item name`);
+        const label = itemLabel(itemName, variant);
+        const adjusted = isPriceAdjusted({ productServiceId, isCustom }, basePrice, price);
+        if (adjusted && !priceReasonInput) {
+          return reject(400, `Add a price adjustment reason for ${label}: ${formatCurrency(price)} differs from the catalog price ${formatCurrency(basePrice)}`);
+        }
+        const subtotal = toCents(quantity * price) / 100;
+        const row = {
+          id: crypto.randomUUID(),
+          product_service_id: productServiceId,
+          item_name_snapshot: itemName,
+          item_description: typeof it.itemDescription === "string" ? it.itemDescription.trim().slice(0, 2000) : "",
+          variant_snapshot: variant,
+          category_snapshot: category,
+          item_type: itemType,
+          is_custom: isCustom,
+          quantity,
+          base_price: basePrice,
+          final_unit_price: price,
+          price_adjustment_reason: adjusted ? priceReasonInput : null,
+          subtotal,
+          quantity_completed: 0,
+        };
+        inserts.push(row);
+        keptRows.push(row);
+        changes[`Added ${label}`] = { from: "—", to: `${quantity} × ${formatCurrency(price)}` };
+        summary.push(`added ${label} (${quantity} × ${formatCurrency(price)})`);
+      }
+    }
+
+    if (updates.length === 0 && inserts.length === 0 && removedIds.length === 0) {
+      return reject(400, "Nothing was changed");
+    }
+
+    // The new total can't drop below what the customer has already paid (void/refund first)
+    const newTotal = keptRows.reduce((sum, it) => sum + toCents(it.subtotal), 0) / 100;
+    const [[{ paid }]] = await conn.query(
+      "SELECT CAST(COALESCE(SUM(amount), 0) AS DOUBLE) AS paid FROM payments WHERE order_id = ? AND voided_at IS NULL",
+      [id]
+    );
+    if (toCents(newTotal) < toCents(paid)) {
+      return reject(
+        400,
+        `The new total ${formatCurrency(newTotal)} is less than the ${formatCurrency(paid)} already paid. An admin must void or correct payments first.`
+      );
+    }
+
+    // Write the lines
+    for (const removedId of removedIds) {
+      await conn.query("DELETE FROM order_items WHERE id = ? AND order_id = ?", [removedId, id]);
+    }
+    for (const u of updates) {
+      await conn.query(
+        `UPDATE order_items SET quantity = ?, final_unit_price = ?, price_adjustment_reason = ?, subtotal = ?,
+          production_progress = ?, production_status = ? WHERE id = ?`,
+        [u.quantity, u.price, u.priceReason, u.subtotal, u.progress, u.status, u.id]
+      );
+    }
+    for (const row of inserts) {
+      await conn.query(
+        `INSERT INTO order_items (
+          id, order_id, product_service_id, item_name_snapshot, item_description, variant_snapshot, category_snapshot,
+          item_type, is_custom, quantity, base_price, final_unit_price, price_adjustment_reason,
+          subtotal, quantity_completed, production_progress, production_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'pending')`,
+        [
+          row.id, id, row.product_service_id, row.item_name_snapshot, row.item_description, row.variant_snapshot,
+          row.category_snapshot, row.item_type, row.is_custom, row.quantity, row.base_price, row.final_unit_price,
+          row.price_adjustment_reason, row.subtotal,
+        ]
+      );
+    }
+
+    // Order totals, payments and production status follow from the lines
+    const oldTotal = Number(order.total_price);
+    await conn.query(
+      "UPDATE orders SET total_price = ?, unit_price = ?, product_name_snapshot = ? WHERE id = ?",
+      [newTotal, keptRows[0].final_unit_price, keptRows.map((it) => it.item_name_snapshot).join(", ").slice(0, 150), id]
+    );
+    const after = await recalcOrderPayments(conn, id);
+    const progress = deriveOrderProgress(keptRows, after.balance);
+    const [[{ today }]] = await conn.query("SELECT DATE_FORMAT(CURDATE(), '%Y-%m-%d') AS today");
+    const userId = req.user?.id || null;
+    const userName = req.user?.full_name || "Staff";
+    await conn.query(
+      `UPDATE orders SET quantity = ?, quantity_completed = ?, overall_progress = ?, status = ?, date_completed = ?, updated_by = ?
+      WHERE id = ?`,
+      [
+        progress.totalQty,
+        progress.totalCompleted,
+        progress.overallProgress,
+        progress.status,
+        progress.status === "completed" ? today : null,
+        userId,
+        id,
+      ]
+    );
+
+    if (toCents(oldTotal) !== toCents(newTotal)) {
+      changes.Total = { from: formatCurrency(oldTotal), to: formatCurrency(newTotal) };
+    }
+    const statusChanged = progress.status !== order.status;
+    if (statusChanged) changes.Status = { from: STATUS_LABELS[order.status], to: STATUS_LABELS[progress.status] };
+
+    const detail =
+      `Items on SOA ${order.soa_no} updated: ${summary.join("; ") || "price reasons updated"}. ` +
+      `Total ${formatCurrency(oldTotal)} → ${formatCurrency(newTotal)}, balance ${formatCurrency(after.balance)}` +
+      `${statusChanged ? `, status ${STATUS_LABELS[order.status]} → ${STATUS_LABELS[progress.status]}` : ""}. Reason: ${reason}`;
+    const notifId = crypto.randomUUID();
+    const now = new Date();
+    await conn.query(
+      `INSERT INTO notifications (
+        id, user_id, user_name, order_id, order_ref, customer_id, customer_name,
+        notification_type, event, message, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'detail_update', 'order.items_update', ?, ?)`,
+      [notifId, userId, userName, id, order.soa_no, order.customer_id, order.customerName, detail, now]
+    );
+    await logAudit(conn, req, {
+      action: "order.items_update",
+      category: "order",
+      entityType: "order",
+      entityId: id,
+      entityLabel: `SOA ${order.soa_no}`,
+      description: detail,
+      changes,
+    });
+
+    await conn.commit();
+
+    const fullOrder = await loadFullOrder(id);
+    emitOrderUpdated(fullOrder);
+    emitNotification({
+      id: notifId,
+      type: "detail_update",
+      event: "order.items_update",
+      user: userName,
+      orderRef: order.soa_no,
+      customerName: order.customerName,
+      detail,
+      timestamp: now,
+      readAt: null,
+    });
+
+    res.json(fullOrder);
+  } catch (err) {
+    await conn.rollback().catch(() => {});
+    console.error("updateOrderItems error:", err);
+    res.status(500).json({ message: "Failed to update the order's items" });
+  } finally {
+    conn.release();
+  }
+}
+
 // PUT /api/orders/:id/production
 // ITEM-LEVEL PRODUCTION MONITORING & PURE QUANTITY-WEIGHTED AGGREGATION
 export async function updateItemProduction(req, res) {
@@ -821,9 +1140,9 @@ export async function updateItemProduction(req, res) {
       if (!match || update.previousQuantityCompleted == null) continue;
       if (Number(update.previousQuantityCompleted) !== Number(match.quantity_completed)) {
         await conn.rollback();
-        const itemLabel = match.variant_snapshot ? `${match.item_name_snapshot} (${match.variant_snapshot})` : match.item_name_snapshot;
+        const label = itemLabel(match.item_name_snapshot, match.variant_snapshot);
         return res.status(409).json({
-          message: `${itemLabel} was updated by someone else (now ${match.quantity_completed}/${match.quantity}). Your changes were not saved.`,
+          message: `${label} was updated by someone else (now ${match.quantity_completed}/${match.quantity}). Your changes were not saved.`,
           conflict: true,
         });
       }
@@ -837,13 +1156,10 @@ export async function updateItemProduction(req, res) {
         const qtyComp = Math.max(0, Math.min(qtyReq, update.quantityCompleted));
         const prevComp = Number(match.quantity_completed);
         if (prevComp !== qtyComp) {
-          const itemLabel = match.variant_snapshot ? `${match.item_name_snapshot} (${match.variant_snapshot})` : match.item_name_snapshot;
-          itemChanges[`${itemLabel} completed`] = { from: `${prevComp}/${qtyReq}`, to: `${qtyComp}/${qtyReq}` };
+          const label = itemLabel(match.item_name_snapshot, match.variant_snapshot);
+          itemChanges[`${label} completed`] = { from: `${prevComp}/${qtyReq}`, to: `${qtyComp}/${qtyReq}` };
         }
-        const itemProgress = qtyReq > 0 ? Math.min(100, Math.round((qtyComp / qtyReq) * 100)) : 0;
-        let itemStatus = "pending";
-        if (itemProgress >= 100) itemStatus = "completed";
-        else if (itemProgress > 0) itemStatus = "in_production";
+        const { progress: itemPct, status: itemStatus } = itemProgress(qtyReq, qtyComp);
 
         await conn.query(
           `UPDATE order_items SET
@@ -851,30 +1167,22 @@ export async function updateItemProduction(req, res) {
             production_progress = ?,
             production_status = ?
           WHERE id = ?`,
-          [qtyComp, itemProgress, itemStatus, update.id]
+          [qtyComp, itemPct, itemStatus, update.id]
         );
 
         // Update local object for subsequent total calculation
         match.quantity_completed = qtyComp;
-        match.production_progress = itemProgress;
+        match.production_progress = itemPct;
         match.production_status = itemStatus;
       }
     }
 
-    // ENTERPRISE CALCULATION: Pure Quantity-Weighted Progress
-    // Overall Progress = (SUM(quantity_completed) / SUM(quantity)) * 100
-    const totalOrderQty = existingItems.reduce((sum, it) => sum + Number(it.quantity), 0);
-    const totalOrderCompleted = existingItems.reduce((sum, it) => sum + Number(it.quantity_completed), 0);
-    const overallProgress = totalOrderQty > 0 ? Math.min(100, Math.round((totalOrderCompleted / totalOrderQty) * 100)) : 0;
-
-    // Derived overall order production status
-    let derivedStatus = "pending";
-    if (overallProgress >= 100) {
-      const hasOutstandingBalance = Number(order.balance) > 0;
-      derivedStatus = hasOutstandingBalance && !allowIncompletePaymentCompletion ? "ready" : "completed";
-    } else if (overallProgress > 0) {
-      derivedStatus = "in_production";
-    }
+    const {
+      totalQty: totalOrderQty,
+      totalCompleted: totalOrderCompleted,
+      overallProgress,
+      status: derivedStatus,
+    } = deriveOrderProgress(existingItems, Number(order.balance), allowIncompletePaymentCompletion);
 
     const [[{ today }]] = await conn.query("SELECT DATE_FORMAT(CURDATE(), '%Y-%m-%d') AS today");
     const dateCompleted = derivedStatus === "completed" ? (order.date_completed || today) : null;

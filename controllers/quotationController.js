@@ -8,15 +8,10 @@ import { renderQuotationHtml } from "../templates/quotationTemplate.js";
 import { diffFields, logAudit } from "../utils/auditLog.js";
 import { describePayment, insertPayment, parsePaymentInput, recalcOrderPayments } from "../utils/payments.js";
 import { loadFullOrder } from "./orderController.js";
+import { isPriceAdjusted } from "../utils/pricing.js";
 
 function peso(n) {
   return "₱" + Number(n || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-// A reason is only needed when a CATALOG item's price was changed. Custom lines
-// have no catalog price (basePrice 0), so any price on them is not an adjustment.
-function isPriceAdjusted(item, basePrice, finalUnitPrice) {
-  return Boolean(item.productServiceId) && !item.isCustom && Math.abs(finalUnitPrice - basePrice) > 0.001;
 }
 
 // Helper to auto-mark expired quotations
