@@ -13,6 +13,12 @@ function peso(n) {
   return "₱" + Number(n || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+// A reason is only needed when a CATALOG item's price was changed. Custom lines
+// have no catalog price (basePrice 0), so any price on them is not an adjustment.
+function isPriceAdjusted(item, basePrice, finalUnitPrice) {
+  return Boolean(item.productServiceId) && !item.isCustom && Math.abs(finalUnitPrice - basePrice) > 0.001;
+}
+
 // Helper to auto-mark expired quotations
 async function markExpiredQuotations() {
   try {
@@ -296,8 +302,8 @@ export async function createQuotation(req, res) {
       const finalUnitPrice = Math.max(0, Number(item.finalUnitPrice) || 0);
 
       // MANDATORY PRICE ADJUSTMENT VALIDATION
-      if (Math.abs(finalUnitPrice - basePrice) > 0.001) {
-        if (!item.priceAdjustmentReason || !item.priceAdjustmentReason.trim()) {
+      if (isPriceAdjusted(item, basePrice, finalUnitPrice)) {
+        if (typeof item.priceAdjustmentReason !== "string" || !item.priceAdjustmentReason.trim()) {
           await conn.rollback();
           return res.status(400).json({
             message: `A Price Adjustment Reason is strictly mandatory for item "${item.itemName}" because final price (${peso(finalUnitPrice)}) differs from catalog base price (${peso(basePrice)}).`,
@@ -353,7 +359,7 @@ export async function createQuotation(req, res) {
         quantity: qty,
         basePrice,
         finalUnitPrice,
-        priceAdjustmentReason: Math.abs(finalUnitPrice - basePrice) > 0.001 ? item.priceAdjustmentReason.trim() : null,
+        priceAdjustmentReason: isPriceAdjusted(item, basePrice, finalUnitPrice) ? item.priceAdjustmentReason.trim() : null,
         subtotal,
       };
     });
@@ -507,8 +513,8 @@ export async function updateQuotation(req, res) {
       const finalUnitPrice = Math.max(0, Number(item.finalUnitPrice) || 0);
 
       // MANDATORY PRICE ADJUSTMENT VALIDATION
-      if (Math.abs(finalUnitPrice - basePrice) > 0.001) {
-        if (!item.priceAdjustmentReason || !item.priceAdjustmentReason.trim()) {
+      if (isPriceAdjusted(item, basePrice, finalUnitPrice)) {
+        if (typeof item.priceAdjustmentReason !== "string" || !item.priceAdjustmentReason.trim()) {
           await conn.rollback();
           return res.status(400).json({
             message: `A Price Adjustment Reason is strictly mandatory for item "${item.itemName}" because final price (${peso(finalUnitPrice)}) differs from catalog base price (${peso(basePrice)}).`,
@@ -537,7 +543,7 @@ export async function updateQuotation(req, res) {
         quantity: qty,
         basePrice,
         finalUnitPrice,
-        priceAdjustmentReason: Math.abs(finalUnitPrice - basePrice) > 0.001 ? item.priceAdjustmentReason.trim() : null,
+        priceAdjustmentReason: isPriceAdjusted(item, basePrice, finalUnitPrice) ? item.priceAdjustmentReason.trim() : null,
         subtotal,
       };
     });
