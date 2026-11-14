@@ -3,9 +3,10 @@
 
 export const AUDIT_CATEGORIES = ["auth", "account", "order", "payment", "quotation", "catalog"];
 
+// req.ip honours Express "trust proxy" (TRUST_PROXY in .env): behind Caddy it is the visitor's address, and a client
+// can't fake it by sending its own X-Forwarded-For header (reading that header directly would let it).
 function clientIp(req) {
-  const forwarded = req?.headers?.["x-forwarded-for"];
-  const ip = (typeof forwarded === "string" && forwarded.split(",")[0].trim()) || req?.ip || req?.socket?.remoteAddress || null;
+  const ip = req?.ip || req?.socket?.remoteAddress || null;
   return ip ? ip.replace(/^::ffff:/, "") : null;
 }
 

@@ -34,12 +34,16 @@ Then start the frontend (see its README) and sign in with the admin you just cre
 `DB_USER`, `DB_PASSWORD`. Download its CA certificate to `certs/ca.pem` and set `DB_SSL_CA=certs/ca.pem`.
 `DB_NAME` can be any new name: `db:setup` creates it next to Aiven's default `defaultdb`.
 
+**Deploying to a server** (DigitalOcean droplet, Ubuntu): see [DEPLOYMENT.md](DEPLOYMENT.md).
+
 ## Scripts
 
 | Command | What it does |
 |---|---|
-| `npm start` | Runs the API with nodemon on `PORT` (default 5000). |
+| `npm start` | Runs the API with nodemon on `PORT` (default 5000). Development only. |
+| `npm run start:prod` | Runs the API with plain Node. On the server, pm2 runs it through `ecosystem.config.cjs`; see [DEPLOYMENT.md](DEPLOYMENT.md). |
 | `npm run db:setup` | Creates `DB_NAME` and applies `schema.sql`. Safe to re-run: existing tables and data are left alone. No demo data. |
+| `npm run gmail:auth` | One time, on a PC with a browser: authorizes the Gmail account in `MAIL_USER` to send through the Gmail API and prints `GMAIL_REFRESH_TOKEN`. |
 | `npm run create-admin` | Creates an active admin. Needed once on a fresh install, because sign-up only creates pending employees. Optional flags: `--name`, `--email`, `--contact`. The password is always asked for. |
 | `npm run migrate:*` | One-time upgrades for databases created **before** a feature existed. All of them are idempotent. **Back up the database first.** A fresh `db:setup` database doesn't need them. |
 | `node scripts/seed.js` | Inserts fake demo orders, but only into an empty `orders` table. **Never run it on real data.** |
@@ -53,10 +57,16 @@ All of them are listed with explanations in [`.env.sample`](.env.sample):
 | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | Database connection (`DB_PORT` defaults to 3306) |
 | `DB_SSL_CA`, `DB_SSL` | SSL for hosted databases (e.g. Aiven). `DB_SSL_CA` = path to the provider's `ca.pem`. Blank for local XAMPP |
 | `DB_TIMEZONE` | Session time zone (default `+08:00`). Keeps `CURDATE()`, SOA numbers and dates in Manila time on UTC servers |
-| `PORT` | API port (default 5000) |
+| `NODE_ENV` | `production` on the server: Secure + SameSite=None login cookie (needs HTTPS), JWT_SECRET ≥ 32 chars enforced |
+| `PORT`, `HOST` | API port (default 5000) and bind address (`127.0.0.1` behind a reverse proxy) |
+| `TRUST_PROXY` | `loopback` behind Caddy/Nginx so audit logs record the visitor's IP |
+| `COOKIE_SAMESITE`, `PDF_BROWSER_IDLE_MS` | Optional overrides, see `.env.sample` |
 | `JWT_SECRET` | Signs login tokens. A long random value, different for every environment |
 | `CLIENT_ORIGIN` | Frontend URL allowed by CORS and Socket.IO (default `http://localhost:5173`) |
-| `MAIL_USER`, `MAIL_APP_PASSWORD`, `MAIL_FROM_NAME` | Gmail + App Password for sign-up and password reset codes. If empty, codes are printed to the console |
+| `MAIL_USER`, `MAIL_FROM_NAME` | Gmail address the emails come from, and the display name |
+| `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN` | Email through the Gmail API (HTTPS; use this on the server). Token from `npm run gmail:auth` |
+| `MAIL_APP_PASSWORD` | Gmail SMTP with an App Password (local development; blocked on DigitalOcean) |
+| `RESEND_API_KEY`, `MAIL_FROM` | Resend instead, only with a domain verified in Resend. If no sender is set, codes are printed to the console |
 
 ## Project layout
 
@@ -64,6 +74,9 @@ All of them are listed with explanations in [`.env.sample`](.env.sample):
 server.js            Express app, route mounting, Socket.IO start-up
 database/db.js       MySQL connection pool (dateStrings: true, session time zone +08:00)
 database/config.js   Connection settings from .env (port, SSL), shared by the pool and db:setup
+utils/runtimeConfig.js  Production settings from .env (cookie, allowed origins, trust proxy)
+assets/              Logo used by the quotation PDF (copy of the frontend's public/CasiguroEnterpriseLogo.png)
+ecosystem.config.cjs pm2 process file for the server
 routes/              URL → controller wiring, one file per area
 controllers/         Request handlers (orders, quotations, catalog, accounts, auth, reports, …)
 middleware/          protect (JWT + active-account + password-changed check), requireAdmin

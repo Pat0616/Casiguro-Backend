@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "nodemon server.js",
+    "start:prod": "node server.js",
     "db:setup": "node scripts/setup_database.js",
     "create-admin": "node scripts/create_admin.js",
     "migrate:catalog-images": "node scripts/migrate_catalog_images.js",
@@ -17,7 +18,8 @@
     "migrate:email-verifications": "node scripts/migrate_email_verifications.js",
     "migrate:jo-number": "node scripts/migrate_jo_number.js",
     "migrate:notification-events": "node scripts/migrate_notification_events.js",
-    "migrate:password-reset": "node scripts/migrate_password_reset.js"
+    "migrate:password-reset": "node scripts/migrate_password_reset.js",
+    "gmail:auth": "node scripts/gmail_auth.js"
   },
   "author": "",
   "license": "ISC",
@@ -31,7 +33,6 @@
     "express": "^5.2.1",
     "express-async-handler": "^1.2.0",
     "jsonwebtoken": "^9.0.3",
-    "mongoose": "^9.9.4",
     "mysql2": "^3.24.3",
     "nodemailer": "^10.2.1",
     "puppeteer": "^25.16.0",
@@ -39,5 +40,8 @@
   },
   "devDependencies": {
     "nodemon": "^3.1.14"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

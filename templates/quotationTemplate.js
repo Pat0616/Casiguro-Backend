@@ -12,20 +12,23 @@ export const COMPANY = {
 
 const MIN_ITEM_ROWS = 8;
 
-// The brand logo (swoosh + "CASIGURO ENTERPRISES, INC." title) shared with the frontend.
-// Both repos sit side by side, so the backend reads it straight from the frontend's public folder.
-const LOGO_FILE = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "../../casiguro-app/public/CasiguroEnterpriseLogo.png"
-);
+// The brand logo (swoosh + "CASIGURO ENTERPRISES, INC." title). The backend keeps its own copy in assets/ because the
+// server only has this repo; it is the same file as the frontend's public/CasiguroEnterpriseLogo.png, so replace
+// both together. In development the frontend's copy is the fallback.
+const templatesDir = path.dirname(fileURLToPath(import.meta.url));
+const LOGO_CANDIDATES = [
+  path.resolve(templatesDir, "../assets/CasiguroEnterpriseLogo.png"),
+  path.resolve(templatesDir, "../../casiguro-app/public/CasiguroEnterpriseLogo.png"),
+];
 
 // Where the artwork sits inside the 500x500 PNG (the rest is transparent padding), used to crop it
 const LOGO_CROP = { imageSize: 500, x: 41, y: 161, width: 418, height: 178 };
 
 // Read on every render so a replaced logo file shows up without restarting the server
 function loadLogoDataUri() {
-  if (!fs.existsSync(LOGO_FILE)) return null;
-  return `data:image/png;base64,${fs.readFileSync(LOGO_FILE).toString("base64")}`;
+  const logoFile = LOGO_CANDIDATES.find((file) => fs.existsSync(file));
+  if (!logoFile) return null;
+  return `data:image/png;base64,${fs.readFileSync(logoFile).toString("base64")}`;
 }
 
 // CSS that crops the padded square PNG to just its artwork. The image is absolutely positioned so it can't

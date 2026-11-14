@@ -8,6 +8,7 @@ import { logAudit, logAuditSafely } from "../utils/auditLog.js";
 import { emitAccountChanged } from "../websocket/socket.js";
 import { sendPasswordChangedEmail, sendPasswordResetCode, sendVerificationCode } from "../utils/mailer.js";
 import { EMAIL_PATTERN, parseRegistration, validatePassword } from "../utils/accountFields.js";
+import { authCookieOptions } from "../utils/runtimeConfig.js";
 
 const BLOCKED_LOGIN_MESSAGES = {
   pending: "Your account is awaiting admin approval. You can sign in once an administrator approves it.",
@@ -252,9 +253,7 @@ export async function verifyRegistration(req, res) {
 
 function setAuthCookie(res, userId) {
   res.cookie("token", generateToken({ id: userId }), {
-    httpOnly: true,
-    secure: false, // set true in production with HTTPS
-    sameSite: "strict",
+    ...authCookieOptions,
     maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
   });
 }
@@ -337,7 +336,8 @@ export async function logout(req, res) {
       // expired or invalid token: nothing to attribute the sign-out to
     }
   }
-  res.clearCookie("token");
+  // Same attributes as when it was set, or browsers may keep a Secure/SameSite=None cookie
+  res.clearCookie("token", authCookieOptions);
   res.json({ message: "Logged out" });
 }
 

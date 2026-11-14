@@ -14,22 +14,26 @@ import quotationRouter from "./routes/quotationRoutes.js";
 import accountRouter from "./routes/accountRoutes.js";
 import reportRouter from "./routes/reportRoutes.js";
 import { initSocket } from "./websocket/socket.js";
+import pool from "./database/db.js";
+import { closePdfBrowser } from "./utils/pdfRenderer.js";
+import { clientOrigins, isProduction, trustProxySetting } from "./utils/runtimeConfig.js";
 
 dotenv.config();
 const app = express();
 const httpServer = http.createServer(app);
 
-const clientOrigin = process.env.CLIENT_ORIGIN || "http://localhost:5173";
+app.set("trust proxy", trustProxySetting());
+app.disable("x-powered-by");
 
 // Initialize WebSocket server
-initSocket(httpServer, clientOrigin);
+initSocket(httpServer, clientOrigins);
 
 app.use(express.json());
 app.use(cookieParser());
 
 app.use(
   cors({
-    origin: clientOrigin,
+    origin: clientOrigins,
     credentials: true,
   })
 );
@@ -48,5 +52,37 @@ app.get("/", (req, res) => {
   res.send("CASIGURO Enterprises API is running...");
 });
 
+// Health check for uptime monitors: also confirms the database answers
+app.get("/api/health", async (req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    res.json({ status: "ok" });
+  } catch {
+    res.status(503).json({ status: "database unavailable" });
+  }
+});
+
 const PORT = process.env.PORT || 5000;
-httpServer.listen(PORT, () => console.log(`Server running on port ${PORT} with WebSocket enabled`));
+// HOST=127.0.0.1 in production keeps the API reachable only through the reverse proxy
+const HOST = process.env.HOST || undefined;
+httpServer.listen(PORT, HOST, () =>
+  console.log(
+    `Server running on ${HOST || "all interfaces"}:${PORT} with WebSocket enabled` +
+      ` (${isProduction ? "production" : "development"}; allowed origins: ${clientOrigins.join(", ")})`
+  )
+);
+
+// pm2 restarts and deploys send SIGINT/SIGTERM: finish open requests, then close Chrome and the database pool
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`${signal} received, shutting down...`);
+  const forceExit = setTimeout(() => process.exit(1), 10000);
+  forceExit.unref();
+  httpServer.close();
+  await Promise.allSettled([closePdfBrowser(), pool.end()]);
+  process.exit(0);
+}
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));

@@ -3,10 +3,11 @@ import { Server } from "socket.io";
 
 let io = null;
 
+// clientOrigin: one URL or a list (CLIENT_ORIGIN may hold several, comma-separated)
 export function initSocket(httpServer, clientOrigin) {
   io = new Server(httpServer, {
     cors: {
-      origin: clientOrigin || "http://localhost:5173",
+      origin: clientOrigin && clientOrigin.length ? clientOrigin : "http://localhost:5173",
       credentials: true,
       methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     },
