@@ -30,6 +30,10 @@ Then start the frontend (see its README) and sign in with the admin you just cre
 
 > On Windows without `cp`, copy `.env.sample` to `.env` by hand.
 
+**Hosted MySQL (Aiven):** use the service's Host, Port, User (`avnadmin`) and Password for `DB_HOST`, `DB_PORT`,
+`DB_USER`, `DB_PASSWORD`. Download its CA certificate to `certs/ca.pem` and set `DB_SSL_CA=certs/ca.pem`.
+`DB_NAME` can be any new name: `db:setup` creates it next to Aiven's default `defaultdb`.
+
 ## Scripts
 
 | Command | What it does |
@@ -46,7 +50,9 @@ All of them are listed with explanations in [`.env.sample`](.env.sample):
 
 | Variable | Purpose |
 |---|---|
-| `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | Database connection |
+| `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | Database connection (`DB_PORT` defaults to 3306) |
+| `DB_SSL_CA`, `DB_SSL` | SSL for hosted databases (e.g. Aiven). `DB_SSL_CA` = path to the provider's `ca.pem`. Blank for local XAMPP |
+| `DB_TIMEZONE` | Session time zone (default `+08:00`). Keeps `CURDATE()`, SOA numbers and dates in Manila time on UTC servers |
 | `PORT` | API port (default 5000) |
 | `JWT_SECRET` | Signs login tokens. A long random value, different for every environment |
 | `CLIENT_ORIGIN` | Frontend URL allowed by CORS and Socket.IO (default `http://localhost:5173`) |
@@ -56,7 +62,8 @@ All of them are listed with explanations in [`.env.sample`](.env.sample):
 
 ```
 server.js            Express app, route mounting, Socket.IO start-up
-database/db.js       MySQL connection pool (dateStrings: true)
+database/db.js       MySQL connection pool (dateStrings: true, session time zone +08:00)
+database/config.js   Connection settings from .env (port, SSL), shared by the pool and db:setup
 routes/              URL → controller wiring, one file per area
 controllers/         Request handlers (orders, quotations, catalog, accounts, auth, reports, …)
 middleware/          protect (JWT + active-account + password-changed check), requireAdmin

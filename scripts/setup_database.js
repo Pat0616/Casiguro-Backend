@@ -5,9 +5,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import mysql from "mysql2/promise";
-import dotenv from "dotenv";
-
-dotenv.config();
+import { connectionOptions, sessionTimeZone } from "../database/config.js";
 
 const dbName = process.env.DB_NAME;
 if (!dbName || !/^\w+$/.test(dbName)) {
@@ -23,12 +21,20 @@ const schema = fs
   .replace(/^USE\s+\w+\s*;/m, "");
 
 // The pool in database/db.js needs the database to exist, so connect to the server first
-const conn = await mysql.createConnection({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  multipleStatements: true,
-});
+const options = connectionOptions();
+let conn;
+try {
+  conn = await mysql.createConnection({ ...options, multipleStatements: true });
+} catch (error) {
+  console.error(`Could not connect to MySQL at ${options.host}:${options.port} (${error.code || error.message}).`);
+  if (error.code === "ETIMEDOUT") {
+    console.error("Check DB_HOST and DB_PORT. Hosted databases (e.g. Aiven) use their own port, not 3306.");
+  }
+  if (/ssl|secure transport/i.test(error.message)) {
+    console.error("This server requires SSL: set DB_SSL_CA to its CA certificate (ca.pem).");
+  }
+  process.exit(1);
+}
 
 const listTables = async () => {
   const [rows] = await conn.query("SELECT TABLE_NAME AS name FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?", [dbName]);
@@ -36,6 +42,7 @@ const listTables = async () => {
 };
 
 try {
+  await conn.query("SET time_zone = ?", [sessionTimeZone]);
   await conn.query(`CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
   await conn.query(`USE \`${dbName}\``);
 
